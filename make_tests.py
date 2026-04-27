@@ -1,124 +1,151 @@
-"""Generate test xlsx files exercising every rule in the manager view.
+"""Generate one xlsx per month, simulating monthly申請 batches the manager
+processes via the 新申請審核 tab.
 
-Settings to use in the manager panel:
+Manager settings to use throughout:
   Gate Day = 2026-12-05
   每日通過上限人數 = 2
   單筆預假最少天數 = 4
   單筆預假最多天數 = 10
   個人年度核准次數上限（點數）= 12
 
-The window is 2026-12-05 ~ 2027-06-06 (Sunday of the week that contains Gate+6mo).
-The historical data is dense pre-2027-01-09 and empty after, so we use clean
-post-2027-01-09 dates plus seeded earlier-in-batch entries to trigger quota.
+Window: 2026-12-05 ~ 2027-06-06 (Sunday of the week containing Gate+6mo).
+
+Process the files in chronological order (filename order). After each batch,
+commit 通過 rows so they accumulate as historical baseline for the next month.
+Each file's first sheet is the upload payload; the second sheet documents the
+expected verdicts for that month.
 """
 import io, sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from openpyxl import Workbook
+
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 HEADERS = ["你的名字", "預假【起日】", "預假【迄日】", "預假天數", "送出時間"]
 
 
-def fmt(d):
-    return d.isoformat() if d else ""
-
-
-def submit_ts(i):
-    return (datetime(2026, 11, 25, 9, 0) + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M")
-
-
 def D(y, m, d):
-    return datetime(y, m, d).date()
+    return date(y, m, d)
 
 
-# (Label, Name, Start, End, Category, Expected)
-cases = [
-    # --- Day-count rule ---
-    ("A. 通過 — 5 天、全空檔",
-        "測試甲", D(2026, 12, 6),  D(2026, 12, 10), "4-10天", "通過"),
-    ("B. 未通過 — 3 天 < 最少 4 天",
-        "測試乙", D(2026, 12, 12), D(2026, 12, 14), "1-3天",  "未通過 - 預假天數錯誤"),
-    ("C. 未通過 — 11 天 > 最多 10 天",
-        "測試丙", D(2026, 12, 16), D(2026, 12, 26), ">10天",  "未通過 - 預假天數錯誤"),
-    ("D. 未通過 — 迄日早於起日",
-        "測試丁", D(2026, 12, 30), D(2026, 12, 26), "4-10天", "未通過 - 預假天數錯誤"),
-
-    # --- Per-day quota (build up via the batch itself) ---
-    ("E1. 通過 — 第 1 人 (該日佔用 1/2)",
-        "測試戊一", D(2027, 1, 12), D(2027, 1, 16), "4-10天", "通過"),
-    ("E2. 通過 — 第 2 人，相同日期 (該日佔用 2/2)",
-        "測試戊二", D(2027, 1, 12), D(2027, 1, 16), "4-10天", "通過"),
-    ("E3. 未通過 — 第 3 人，相同日期 (已超過上限人數)",
-        "測試戊三", D(2027, 1, 12), D(2027, 1, 16), "4-10天", "未通過 - 已超過上限人數"),
-    ("E4. 未通過 — 與 E1/E2 部分重疊 (重疊那幾天已 2/2)",
-        "測試戊四", D(2027, 1, 14), D(2027, 1, 19), "4-10天", "未通過 - 已超過上限人數"),
-
-    # --- Yearly 12-point cap (測試庚 submits 13 successful applications in 2027) ---
-    ("F01. 通過 — 測試庚 第 1 次 (累計 1/12)",
-        "測試庚", D(2027, 2, 1),  D(2027, 2, 4),  "4-10天", "通過"),
-    ("F02. 通過 — 測試庚 第 2 次 (累計 2/12)",
-        "測試庚", D(2027, 2, 8),  D(2027, 2, 11), "4-10天", "通過"),
-    ("F03. 通過 — 測試庚 第 3 次 (累計 3/12)",
-        "測試庚", D(2027, 2, 15), D(2027, 2, 18), "4-10天", "通過"),
-    ("F04. 通過 — 測試庚 第 4 次 (累計 4/12)",
-        "測試庚", D(2027, 2, 22), D(2027, 2, 25), "4-10天", "通過"),
-    ("F05. 通過 — 測試庚 第 5 次 (累計 5/12)",
-        "測試庚", D(2027, 3, 1),  D(2027, 3, 4),  "4-10天", "通過"),
-    ("F06. 通過 — 測試庚 第 6 次 (累計 6/12)",
-        "測試庚", D(2027, 3, 8),  D(2027, 3, 11), "4-10天", "通過"),
-    ("F07. 通過 — 測試庚 第 7 次 (累計 7/12)",
-        "測試庚", D(2027, 3, 15), D(2027, 3, 18), "4-10天", "通過"),
-    ("F08. 通過 — 測試庚 第 8 次 (累計 8/12)",
-        "測試庚", D(2027, 3, 22), D(2027, 3, 25), "4-10天", "通過"),
-    ("F09. 通過 — 測試庚 第 9 次 (累計 9/12)",
-        "測試庚", D(2027, 3, 29), D(2027, 4, 1),  "4-10天", "通過"),
-    ("F10. 通過 — 測試庚 第 10 次 (累計 10/12)",
-        "測試庚", D(2027, 4, 5),  D(2027, 4, 8),  "4-10天", "通過"),
-    ("F11. 通過 — 測試庚 第 11 次 (累計 11/12)",
-        "測試庚", D(2027, 4, 12), D(2027, 4, 15), "4-10天", "通過"),
-    ("F12. 通過 — 測試庚 第 12 次 (累計 12/12，剛好用完)",
-        "測試庚", D(2027, 4, 19), D(2027, 4, 22), "4-10天", "通過"),
-    ("F13. 未通過 — 測試庚 第 13 次 (年度點數不足)",
-        "測試庚", D(2027, 4, 26), D(2027, 4, 29), "4-10天", "未通過 - 年度點數不足"),
-
-    # --- Bookable window ---
-    ("G. 未通過 — 起日早於 Gate Day (2026-12-05)",
-        "測試辛", D(2026, 11, 25), D(2026, 11, 29), "4-10天", "未通過 - 超出可預約範圍"),
-    ("H. 未通過 — 迄日晚於本輪結束 (2027-06-06)",
-        "測試壬", D(2027, 6, 4),  D(2027, 6, 10), "4-10天", "未通過 - 超出可預約範圍"),
-]
+def fmt(d):
+    return d.isoformat()
 
 
-def write_book(path, rows_):
+def days(s, e):
+    return (e - s).days + 1
+
+
+def category(s, e):
+    n = days(s, e)
+    if n < 4:
+        return "1-3天"
+    if n > 10:
+        return ">10天"
+    return "4-10天"
+
+
+# Each batch is keyed by (year, month) of submission. Submissions in a batch
+# are timestamped sequentially within that month so the manager tab evaluates
+# them top-to-bottom (priority = submission order).
+#
+# Row schema: (label, name, start_date, end_date, expected_verdict)
+#   expected_verdict assumes batches are processed in order and 通過 rows from
+#   earlier batches are committed before the next batch is uploaded.
+
+batches = {
+    # First batch — clean state, exercises gate-day boundary.
+    (2026, 11): [
+        ("A1. 通過 — 5 天，視窗開頭",          "測試甲", D(2026, 12,  7), D(2026, 12, 11), "通過"),
+        ("A2. 未通過 — 起日早於 Gate Day",     "測試乙", D(2026, 11, 25), D(2026, 11, 29), "未通過 - 超出可預約範圍"),
+        ("A3. 通過 — 5 天，月中",              "測試丙", D(2026, 12, 14), D(2026, 12, 18), "通過"),
+    ],
+
+    # Day-count edge cases.
+    (2026, 12): [
+        ("B1. 通過 — 4 天剛好下限",            "測試丁", D(2026, 12, 28), D(2026, 12, 31), "通過"),
+        ("B2. 未通過 — 11 天 > 上限 10",       "測試戊", D(2027,  1,  5), D(2027,  1, 15), "未通過 - 預假天數錯誤"),
+        ("B3. 未通過 — 3 天 < 下限 4",         "測試己", D(2027,  1, 18), D(2027,  1, 20), "未通過 - 預假天數錯誤"),
+        ("B4. 未通過 — 迄日早於起日",          "測試庚", D(2027,  1, 25), D(2027,  1, 21), "未通過 - 預假天數錯誤"),
+    ],
+
+    # Per-day quota — three people on the same window, fourth partial overlap.
+    (2027, 1): [
+        ("C1. 通過 — 第 1 人 (該日佔 1/2)",    "測試辛", D(2027,  2,  8), D(2027,  2, 12), "通過"),
+        ("C2. 通過 — 第 2 人，相同日期 (2/2)", "測試壬", D(2027,  2,  8), D(2027,  2, 12), "通過"),
+        ("C3. 未通過 — 第 3 人，相同日期",      "測試癸", D(2027,  2,  8), D(2027,  2, 12), "未通過 - 已超過上限人數"),
+        ("C4. 未通過 — 與 C1/C2 部分重疊",      "測試地", D(2027,  2, 10), D(2027,  2, 15), "未通過 - 已超過上限人數"),
+        ("C5. 通過 — 不重疊的隔週",            "測試玄", D(2027,  2, 15), D(2027,  2, 19), "通過"),
+    ],
+
+    # 測試年 starts a yearly-12-points marathon.
+    (2027, 2): [
+        ("D1. 通過 — 測試年 1/12",             "測試年", D(2027,  3,  1), D(2027,  3,  4), "通過"),
+        ("D2. 通過 — 測試年 2/12",             "測試年", D(2027,  3,  8), D(2027,  3, 11), "通過"),
+        ("D3. 通過 — 測試年 3/12",             "測試年", D(2027,  3, 15), D(2027,  3, 18), "通過"),
+        ("D4. 通過 — 測試年 4/12",             "測試年", D(2027,  3, 22), D(2027,  3, 25), "通過"),
+    ],
+
+    (2027, 3): [
+        ("E1. 通過 — 測試年 5/12",             "測試年", D(2027,  4,  5), D(2027,  4,  8), "通過"),
+        ("E2. 通過 — 測試年 6/12",             "測試年", D(2027,  4, 12), D(2027,  4, 15), "通過"),
+        ("E3. 通過 — 測試年 7/12",             "測試年", D(2027,  4, 19), D(2027,  4, 22), "通過"),
+        ("E4. 通過 — 測試年 8/12",             "測試年", D(2027,  4, 26), D(2027,  4, 29), "通過"),
+    ],
+
+    # Fill remaining points; trip yearly cap; trip end-of-window.
+    (2027, 4): [
+        ("F1. 通過 — 測試年 9/12",             "測試年", D(2027,  5,  3), D(2027,  5,  6), "通過"),
+        ("F2. 通過 — 測試年 10/12",            "測試年", D(2027,  5, 10), D(2027,  5, 13), "通過"),
+        ("F3. 通過 — 測試年 11/12",            "測試年", D(2027,  5, 17), D(2027,  5, 20), "通過"),
+        ("F4. 通過 — 測試年 12/12 剛好用完",    "測試年", D(2027,  5, 24), D(2027,  5, 27), "通過"),
+        ("F5. 未通過 — 測試年 13 (年度點數不足)", "測試年", D(2027,  5, 31), D(2027,  6,  3), "未通過 - 年度點數不足"),
+        ("F6. 未通過 — 迄日晚於本輪結束",        "測試宙", D(2027,  6,  4), D(2027,  6, 10), "未通過 - 超出可預約範圍"),
+    ],
+}
+
+
+def submit_ts(year, month, idx):
+    # Spread submissions across the month, preserving order.
+    base = datetime(year, month, 5, 9, 0)
+    return (base + timedelta(hours=idx)).strftime("%Y-%m-%d %H:%M")
+
+
+def write_batch(year, month, rows):
     wb = Workbook()
     sh = wb.active
     sh.title = "新申請"
     sh.append(HEADERS)
-    for i, (_label, name, s, e, cat, _exp) in enumerate(rows_):
-        sh.append([name, fmt(s), fmt(e), cat, submit_ts(i)])
+    for i, (_label, name, s, e, _exp) in enumerate(rows):
+        sh.append([name, fmt(s), fmt(e), category(s, e), submit_ts(year, month, i)])
+
     doc = wb.create_sheet("測試說明")
-    doc.append(["#", "情境", "姓名", "起日", "迄日", "天數", "預期結果"])
-    for i, (label, name, s, e, _cat, expected) in enumerate(rows_, 1):
-        days = (e - s).days + 1 if (s and e) else ""
-        doc.append([i, label, name, fmt(s), fmt(e), days, expected])
+    doc.append(["#", "情境", "姓名", "起日", "迄日", "天數", "類別", "預期結果"])
+    for i, (label, name, s, e, exp) in enumerate(rows, 1):
+        doc.append([i, label, name, fmt(s), fmt(e), days(s, e), category(s, e), exp])
+
+    path = f"batch-{year:04d}-{month:02d}.xlsx"
     wb.save(path)
-    print(f"Wrote {path} ({len(rows_)} rows)")
+    return path
 
 
-# A second small file with only the rows expected to pass on a clean state.
-happy = [c for c in cases if c[5] == "通過"]
-write_book("test-mixed.xlsx", cases)
-write_book("test-pass-only.xlsx", happy)
+written = []
+for (y, m), rows in batches.items():
+    written.append((y, m, write_batch(y, m, rows), rows))
 
 print()
 print("=" * 64)
-print("Set the manager panel to:")
-print("  Gate Day = 2026-12-05")
-print("  Quota=2  Min=4  Max=10  YearlyPoints=12")
+print("Manager panel settings:")
+print("  Gate Day = 2026-12-05   Quota=2   Min=4   Max=10   YearlyPoints=12")
 print("=" * 64)
 print()
-print("Cases (in order — predictor processes top-to-bottom):")
-for i, (label, name, s, e, cat, exp) in enumerate(cases, 1):
-    days = (e - s).days + 1
-    print(f"  {i:2d}. [{exp:<24s}] {label}")
-    print(f"        {name:<8s} {fmt(s)} → {fmt(e)} ({days} 天, 類別 {cat})")
+print("Process these in order, committing 通過 rows between batches:")
+print()
+for y, m, path, rows in written:
+    pass_n = sum(1 for r in rows if r[4] == "通過")
+    fail_n = len(rows) - pass_n
+    print(f"  {path}  ({len(rows)} rows: {pass_n} 通過 / {fail_n} 未通過)")
+    for i, (label, name, s, e, exp) in enumerate(rows, 1):
+        print(f"    {i}. [{exp:<24s}] {label}")
+        print(f"         {name}  {fmt(s)} → {fmt(e)}  ({days(s, e)} 天)")
+    print()
