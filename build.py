@@ -28,12 +28,12 @@ OUT = ROOT / "index.html"
 MANAGER_PASSWORD = "FJUH.pharm0426"
 PBKDF2_ITERS = 200_000
 
-# Default Gate Day for the current booking round (the first Saturday of the round).
-# The bookable window is computed as: GATE_DAY → Sunday of (GATE_DAY + 6 months).
-# To rotate to a new round: edit the date below and rerun build.py.
+# Gate Day is auto-computed at page-load time as the first Saturday of the
+# current month, or the first Saturday of next month if this month's first
+# Saturday has already passed. The rotation logic lives in JS (see
+# computeGateDay() below) so the page stays accurate without rebuilds.
 # The manager can still override at runtime via the manager tab; the override
 # persists in localStorage (per browser) until cleared.
-GATE_DAY = "2026-05-02"
 
 
 def encrypt_manager_block(plaintext: str, password: str) -> dict:
@@ -316,10 +316,32 @@ HTML_TEMPLATE = r"""<!doctype html>
 <script>
 const BAKED = __DATA__;
 const HEADERS = __HEADERS__;
-const DEFAULT_GATE_DAY = __GATE_DAY__;
 const STORAGE_KEY = 'booking-extra-records-v1';
 const BATCH_KEY = 'booking-batch-v1';
 const GATE_DAY_KEY = 'booking-gate-day-v1';
+
+// =============== GATE DAY (auto-rotated) ===============
+// First Saturday of the current month if not yet passed, else first Saturday
+// of next month. Pure runtime computation — no rebuild needed when a round
+// ends. Manager runtime override (localStorage) takes precedence.
+function firstSaturdayOf(y, m) {
+  const d = new Date(y, m - 1, 1);
+  d.setDate(1 + ((6 - d.getDay() + 7) % 7));
+  return d;
+}
+function isoDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function computeGateDay() {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  let fs = firstSaturdayOf(today.getFullYear(), today.getMonth() + 1);
+  if (today > fs) {
+    let m = today.getMonth() + 2, y = today.getFullYear();
+    if (m > 12) { m = 1; y += 1; }
+    fs = firstSaturdayOf(y, m);
+  }
+  return isoDate(fs);
+}
 
 // =============== STATE ===============
 const state = {
@@ -328,7 +350,7 @@ const state = {
   sortKey: '_start_iso', sortDir: 'desc',
   page: 1, pageSize: 50,
   quota: 2, minDays: 4, maxDays: 10, yearlyPoints: 12,
-  gateDay: (localStorage.getItem(GATE_DAY_KEY) || DEFAULT_GATE_DAY),
+  gateDay: (localStorage.getItem(GATE_DAY_KEY) || computeGateDay()),
   batch: [],
 };
 
@@ -1021,9 +1043,15 @@ function bindManager() {
   $('maxDays').onchange = (e) => { state.maxDays = Math.max(1, Number(e.target.value) || 1); renderManager(); };
   $('yearlyPoints').onchange = (e) => { state.yearlyPoints = Math.max(1, Number(e.target.value) || 1); renderManager(); };
   $('gateDay').onchange = (e) => {
-    state.gateDay = e.target.value;
-    if (state.gateDay) localStorage.setItem(GATE_DAY_KEY, state.gateDay);
-    else localStorage.removeItem(GATE_DAY_KEY);
+    const v = e.target.value;
+    if (v) {
+      state.gateDay = v;
+      localStorage.setItem(GATE_DAY_KEY, v);
+    } else {
+      // Cleared → fall back to auto-computed Gate Day.
+      state.gateDay = computeGateDay();
+      localStorage.removeItem(GATE_DAY_KEY);
+    }
     renderManager();
     showRange();
   };
@@ -1229,7 +1257,6 @@ def main():
     html = (HTML_TEMPLATE
             .replace("__DATA__", json.dumps(data, ensure_ascii=False))
             .replace("__HEADERS__", json.dumps(headers, ensure_ascii=False))
-            .replace("__GATE_DAY__", json.dumps(GATE_DAY))
             .replace("__ENC__", json.dumps(enc)))
     OUT.write_text(html, encoding="utf-8")
     print(f"Wrote {OUT}  ({OUT.stat().st_size:,} bytes,  {len(data)} records,"
