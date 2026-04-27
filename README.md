@@ -17,9 +17,9 @@ Day-by-day occupancy for the touched dates is shown so it's obvious which days a
 | [index.html](index.html) | Built output. Open directly in a browser — no server needed. |
 | [build.py](build.py) | Reads the xlsx, encrypts the manager block, and writes `index.html`. |
 | [booking_rules.md](booking_rules.md) | The approval rules the manager tab enforces. |
-| [make_tests.py](make_tests.py) | Generates `test-mixed.xlsx` + `test-pass-only.xlsx` covering every rule. |
+| [make_tests.py](make_tests.py) | Generates `batch-YYYY-MM.xlsx` files — one per month — that simulate the申請 batches the manager would receive. |
 | `202401-202604預假紀錄.xlsx` | Source data baked into the page. |
-| `test-*.xlsx` | Sample申請 batches for trying the manager tab. |
+| `batch-*.xlsx` | Monthly申請 batches for trying the manager tab. Process in filename order, committing 通過 rows between batches so history accumulates. |
 
 ## Build
 
@@ -42,9 +42,17 @@ Manager-committed rows and in-progress batches live in `localStorage` (`booking-
 
 ## Test scenarios
 
-Run `python make_tests.py` to regenerate the test files. Recommended manager-tab settings to exercise them:
+Run `python make_tests.py` to regenerate the monthly batch files
+(`batch-2026-11.xlsx` … `batch-2027-04.xlsx`). Recommended manager-tab settings:
 
 - Gate Day = `2026-12-05`
 - 每日上限 = 2 / 單筆 4–10 天 / 年度 12 點
 
-[make_tests.py](make_tests.py) documents the expected verdict for every row.
+Process the batches in filename order. After each batch, commit 通過 rows
+before uploading the next month — this lets historical state accumulate the
+way it would in real use, so cross-month rules (yearly point cap, day-quota
+across earlier approvals) are exercised end-to-end.
+
+Each xlsx has the upload payload on the first sheet (`新申請`) and the
+expected verdict for every row documented on the second sheet (`測試說明`).
+Running `make_tests.py` also prints the same summary to stdout.
