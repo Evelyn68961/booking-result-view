@@ -820,7 +820,7 @@ function renderManager() {
   const w = roundWindow();
   $('windowHelp').innerHTML = w
     ? `<b>本輪可預約範圍：${w.from} ～ ${w.to}</b>（含）。單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。`
-    : `規則：單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。<br/>請填入 Gate Day 以啟用「可預約範圍」檢查。`;
+    : `規則：單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。<br/>請填入預約視窗開始日以啟用「可預約範圍」檢查。`;
   renderBatch();
 }
 
@@ -974,14 +974,14 @@ MANAGER_HTML_BLOCK = """\
     <label>個人年度核准次數上限（點數）
       <input id="yearlyPoints" type="number" min="1" value="12" />
     </label>
-    <label>本輪 Gate Day（首週六）
+    <label>預約視窗開始日（本輪首週六）
       <input id="gateDay" type="date" />
     </label>
   </div>
   <div class="help" id="windowHelp">
     規則：單筆 4–10 天、每日最多 2 人、每人每年 12 次核准（每筆通過扣 1 點，依起日年份計算），
-    預假日須落在 <b>Gate Day</b> 至 <b>(Gate Day + 6 個月) 該週週日</b> 之間。
-    留空 Gate Day 則略過範圍檢查。
+    預假日須落在 <b>預約視窗開始日</b> 至 <b>(開始日 + 6 個月) 該週週日</b> 之間。
+    留空則略過範圍檢查。
   </div>
 </div>
 
