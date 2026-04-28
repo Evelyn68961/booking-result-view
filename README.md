@@ -6,6 +6,8 @@ A single-file HTML viewer + manager-approval helper for the existing 預假 Exce
 
 **檢視紀錄 tab** — search, filter, sort, and paginate every row in the baked xlsx (姓名 / 審核結果 / 起日 / 迄日 / 天數 / 送出時間 / 特休 / 時數). Manager-committed rows are marked `手動加入`.
 
+**預約日曆 tab** — month grid showing per-day occupancy of all 通過 entries (baked history + manager-committed rows). Cells are colour-coded — green = 空, yellow = 1 人, red = 2 人以上. Click a day to see who's booked (姓名 / 起日 / 迄日).
+
 **新申請審核 tab (password-protected)** — drop in a new申請 xlsx/csv (or add rows manually), and the page predicts 通過 / 未通過 for each entry by replaying the rules in [booking_rules.md](booking_rules.md) against the baked history + already-approved entries earlier in the batch. Manager can override (強制通過 / 強制未通過), commit decisions to localStorage, or export the batch as xlsx.
 
 Day-by-day occupancy for the touched dates is shown so it's obvious which days are full.
@@ -43,15 +45,25 @@ Manager-committed rows and in-progress batches live in `localStorage` (`booking-
 ## Test scenarios
 
 Run `python make_tests.py` to regenerate the monthly batch files
-(`batch-2026-11.xlsx` … `batch-2027-04.xlsx`). Recommended manager-tab settings:
+(`batch-2026-04.xlsx` … `batch-2026-10.xlsx`). Recommended manager-tab settings:
 
-- Gate Day = `2026-12-05`
+- Gate Day = `2026-05-02` → bookable window 2026-05-02 ~ 2027-01-03
 - 每日上限 = 2 / 單筆 4–10 天 / 年度 12 點
 
 Process the batches in filename order. After each batch, commit 通過 rows
 before uploading the next month — this lets historical state accumulate the
 way it would in real use, so cross-month rules (yearly point cap, day-quota
 across earlier approvals) are exercised end-to-end.
+
+What each batch exercises:
+
+| Batch | Coverage |
+|---|---|
+| `batch-2026-04.xlsx` | Gate-day boundary (start before Gate Day fails) |
+| `batch-2026-05.xlsx` | Day-count edges (4 days OK, 11 too long, 3 too short, reversed dates) |
+| `batch-2026-06.xlsx` | Per-day quota (3rd person on same dates fails, partial overlap fails) |
+| `batch-2026-07.xlsx` … `batch-2026-09.xlsx` | 測試年's 12-points marathon (1/12 → 12/12 → 13/12 fails year cap) |
+| `batch-2026-10.xlsx` | **December rush** — quota contention on prime weeks, Christmas overlap, and the 2027-01-03 window-end boundary (G7 ends exactly on the boundary, G8 one day past) |
 
 Each xlsx has the upload payload on the first sheet (`新申請`) and the
 expected verdict for every row documented on the second sheet (`測試說明`).
