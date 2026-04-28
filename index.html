@@ -254,16 +254,17 @@ function isWeekend(iso) {
   const dow = new Date(iso + 'T00:00:00').getDay();
   return dow === 0 || dow === 6;
 }
-// Compute round window end: first Sunday of the month after Gate Day + 7 months (inclusive).
+// Compute round window end: gateDay + 6 months, then advance to the Sunday of that week (inclusive).
 function roundWindow() {
   if (!state.gateDay) return null;
   const d = new Date(state.gateDay + 'T00:00:00');
-  // Day-1 of (Gate Day's month + 8) — handles year rollover automatically.
-  const end = new Date(d.getFullYear(), d.getMonth() + 8, 1);
-  // Advance to the Sunday on or after the 1st. JS getDay(): Sun=0, Mon=1 ... Sat=6.
+  const end = new Date(d);
+  end.setMonth(end.getMonth() + 6);
+  // Advance to the Sunday on or after `end`. JS getDay(): Sun=0, Mon=1 ... Sat=6.
+  // Days until Sunday = (7 - dow) % 7.
   const dow = end.getDay();
   end.setDate(end.getDate() + ((7 - dow) % 7));
-  const iso = (x) => new Date(x.getTime() - x.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+  const iso = (x) => x.toISOString().slice(0, 10);
   return { from: state.gateDay, to: iso(end) };
 }
 function inRoundWindow(iso) {
