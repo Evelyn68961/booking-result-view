@@ -334,17 +334,16 @@ function isWeekend(iso) {
   const dow = new Date(iso + 'T00:00:00').getDay();
   return dow === 0 || dow === 6;
 }
-// Compute round window end: gateDay + 6 months, then advance to the Sunday of that week (inclusive).
+// Compute round window end: first Sunday of the month after Gate Day + 7 months (inclusive).
 function roundWindow() {
   if (!state.gateDay) return null;
   const d = new Date(state.gateDay + 'T00:00:00');
-  const end = new Date(d);
-  end.setMonth(end.getMonth() + 6);
-  // Advance to the Sunday on or after `end`. JS getDay(): Sun=0, Mon=1 ... Sat=6.
-  // Days until Sunday = (7 - dow) % 7.
+  // Day-1 of (Gate Day's month + 8) — handles year rollover automatically.
+  const end = new Date(d.getFullYear(), d.getMonth() + 8, 1);
+  // Advance to the Sunday on or after the 1st. JS getDay(): Sun=0, Mon=1 ... Sat=6.
   const dow = end.getDay();
   end.setDate(end.getDate() + ((7 - dow) % 7));
-  const iso = (x) => x.toISOString().slice(0, 10);
+  const iso = (x) => new Date(x.getTime() - x.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
   return { from: state.gateDay, to: iso(end) };
 }
 function inRoundWindow(iso) {
@@ -980,7 +979,7 @@ MANAGER_HTML_BLOCK = """\
   </div>
   <div class="help" id="windowHelp">
     規則：單筆 4–10 天、每日最多 2 人、每人每年 12 次核准（每筆通過扣 1 點，依起日年份計算），
-    預假日須落在 <b>Gate Day</b> 至 <b>(Gate Day + 6 個月) 該週週日</b> 之間。
+    預假日須落在 <b>Gate Day</b> 至 <b>(Gate Day + 7 個月) 之次月首個週日</b> 之間。
     留空 Gate Day 則略過範圍檢查。
   </div>
 </div>

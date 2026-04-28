@@ -6,7 +6,7 @@ This file is the source-of-truth for the approval rules applied by 預假紀錄�
 
 ## Business Rules
 
-- Bookable window: Gate Day → Sunday of the week containing (Gate Day + 6 months), inclusive. If Gate Day is left blank in the UI, the range check is skipped.
+- Bookable window: Gate Day → first Sunday of the month after (Gate Day + 7 months), inclusive. If Gate Day is left blank in the UI, the range check is skipped.
 - Each submission: 1 consecutive block of **4–10 days** (configurable: `minDays` / `maxDays`).
 - Multiple blocks per person allowed.
 - Max **2 people per day** per calendar date, counted across all approved blocks (configurable: `quota`).
