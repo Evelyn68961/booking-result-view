@@ -168,6 +168,29 @@ HTML_TEMPLATE = r"""<!doctype html>
   .day-cell.tight { background: #fef3c7; color: var(--pending); }
   .day-cell .d { font-variant-numeric: tabular-nums; }
   .day-cell .n { font-weight: 600; }
+  .cal-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .cal-toolbar button { padding: 6px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 13px; }
+  .cal-toolbar button:hover { background: #f5f6fa; }
+  .cal-month-label { font-size: 16px; font-weight: 600; min-width: 130px; text-align: center; }
+  .cal-legend { display: flex; gap: 14px; margin-left: auto; font-size: 12px; color: var(--muted); align-items: center; }
+  .cal-legend .swatch { display: inline-block; width: 14px; height: 14px; border-radius: 3px; margin-right: 4px; vertical-align: middle; border: 1px solid var(--border); }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .cal-head { background: #f5f6fa; padding: 8px; text-align: center; font-size: 12px; color: var(--muted); font-weight: 600; }
+  .cal-cell { background: var(--panel); padding: 8px 6px; min-height: 60px; cursor: pointer; user-select: none; transition: filter 0.15s; }
+  .cal-cell:hover:not(.empty) { filter: brightness(0.94); }
+  .cal-cell.empty { background: #fafbfd; color: #cbd0db; cursor: default; }
+  .cal-cell .num { font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 500; }
+  .cal-cell .cnt { font-size: 11px; margin-top: 6px; color: var(--muted); }
+  .cal-cell.lvl0 { background: #f0fdf4; }
+  .cal-cell.lvl1 { background: #fef9c3; }
+  .cal-cell.lvl2 { background: #fecaca; }
+  .cal-cell.lvl0 .cnt { color: #16a34a; }
+  .cal-cell.lvl1 .cnt { color: #ca8a04; }
+  .cal-cell.lvl2 .cnt { color: #dc2626; font-weight: 600; }
+  .cal-cell.selected { outline: 2px solid var(--accent); outline-offset: -2px; z-index: 1; position: relative; }
+  .cal-day-list { width: 100%; font-size: 13px; border-collapse: collapse; }
+  .cal-day-list th, .cal-day-list td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .cal-day-list th { font-weight: 600; color: var(--muted); font-size: 12px; }
   .hidden { display: none !important; }
   .lock-card { max-width: 420px; margin: 60px auto; padding: 32px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; text-align: center; }
   .lock-card .icon { font-size: 32px; margin-bottom: 8px; }
@@ -191,6 +214,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   </div>
   <div class="tabs">
     <button class="tab active" data-tab="view">檢視紀錄</button>
+    <button class="tab" data-tab="calendar">預約日曆</button>
     <button class="tab" data-tab="manager">新申請審核（管理員）</button>
   </div>
 </header>
@@ -239,6 +263,28 @@ HTML_TEMPLATE = r"""<!doctype html>
         <tbody id="body"></tbody>
       </table>
       <div class="pager" id="pager"></div>
+    </div>
+  </section>
+
+  <!-- ============ CALENDAR TAB ============ -->
+  <section id="tab-calendar" class="hidden">
+    <div class="panel">
+      <div class="cal-toolbar">
+        <button id="calPrev">‹ 上個月</button>
+        <span class="cal-month-label" id="calMonthLabel"></span>
+        <button id="calNext">下個月 ›</button>
+        <button id="calToday">回到今天</button>
+        <span class="cal-legend">
+          <span><span class="swatch" style="background:#f0fdf4;"></span>空</span>
+          <span><span class="swatch" style="background:#fef9c3;"></span>1 人</span>
+          <span><span class="swatch" style="background:#fecaca;"></span>2 人以上</span>
+        </span>
+      </div>
+      <div class="cal-grid" id="calGrid"></div>
+    </div>
+    <div class="panel">
+      <h2 id="calDayTitle">點選日期以查看當日預假人員</h2>
+      <div id="calDayBody" class="help">尚未選擇日期。</div>
     </div>
   </section>
 
@@ -334,17 +380,16 @@ function isWeekend(iso) {
   const dow = new Date(iso + 'T00:00:00').getDay();
   return dow === 0 || dow === 6;
 }
-// Compute round window end: gateDay + 6 months, then advance to the Sunday of that week (inclusive).
+// Compute round window end: first Sunday of the month after Gate Day + 7 months (inclusive).
 function roundWindow() {
   if (!state.gateDay) return null;
   const d = new Date(state.gateDay + 'T00:00:00');
-  const end = new Date(d);
-  end.setMonth(end.getMonth() + 6);
-  // Advance to the Sunday on or after `end`. JS getDay(): Sun=0, Mon=1 ... Sat=6.
-  // Days until Sunday = (7 - dow) % 7.
+  // Day-1 of (Gate Day's month + 8) — handles year rollover automatically.
+  const end = new Date(d.getFullYear(), d.getMonth() + 8, 1);
+  // Advance to the Sunday on or after the 1st. JS getDay(): Sun=0, Mon=1 ... Sat=6.
   const dow = end.getDay();
   end.setDate(end.getDate() + ((7 - dow) % 7));
-  const iso = (x) => x.toISOString().slice(0, 10);
+  const iso = (x) => new Date(x.getTime() - x.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
   return { from: state.gateDay, to: iso(end) };
 }
 function inRoundWindow(iso) {
@@ -828,10 +873,124 @@ function renderManager() {
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   $('tab-view').classList.toggle('hidden', name !== 'view');
+  $('tab-calendar').classList.toggle('hidden', name !== 'calendar');
   $('tab-manager').classList.toggle('hidden', name !== 'manager');
   if (name === 'view') renderView();
+  else if (name === 'calendar') renderCalendar();
   else if (MANAGER_UNLOCKED) renderManager();
   else { setTimeout(() => { const i = document.getElementById('pwInput'); if (i) i.focus(); }, 0); }
+}
+
+// =============== CALENDAR TAB ===============
+const CAL_FULL_THRESHOLD = 2;
+const calState = { year: 0, month: 0, selected: '' };
+
+function calOccupancy() {
+  const map = new Map();
+  for (const r of allRecords()) {
+    if (classifyStatus(r['審核結果']) !== 'pass') continue;
+    const s = r._start_iso, e = r._end_iso;
+    if (!s || !e || e < s) continue;
+    for (const d of iterDates(s, e)) {
+      if (!map.has(d)) map.set(d, []);
+      map.get(d).push({ name: r['你的名字'] || '(無姓名)', start: s, end: e });
+    }
+  }
+  return map;
+}
+
+function calLevel(count) {
+  if (count <= 0) return 0;
+  if (count < CAL_FULL_THRESHOLD) return 1;
+  return 2;
+}
+
+function renderCalendar() {
+  if (!calState.year) initCalendarMonth();
+  const occ = calOccupancy();
+  const y = calState.year, m = calState.month;
+  $('calMonthLabel').textContent = `${y} 年 ${String(m).padStart(2, '0')} 月`;
+
+  const startDow = new Date(y, m - 1, 1).getDay();
+  const daysInMonth = new Date(y, m, 0).getDate();
+
+  const heads = ['日','一','二','三','四','五','六'];
+  let html = heads.map(h => `<div class="cal-head">${h}</div>`).join('');
+  for (let i = 0; i < startDow; i++) html += '<div class="cal-cell empty"></div>';
+  for (let d = 1; d <= daysInMonth; d++) {
+    const iso = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const list = occ.get(iso) || [];
+    const cnt = list.length;
+    const lvl = calLevel(cnt);
+    const sel = iso === calState.selected ? ' selected' : '';
+    const label = cnt === 0 ? '空' : `${cnt} 人`;
+    html += `<div class="cal-cell lvl${lvl}${sel}" data-d="${iso}"><div class="num">${d}</div><div class="cnt">${label}</div></div>`;
+  }
+  const total = startDow + daysInMonth;
+  const pad = (7 - (total % 7)) % 7;
+  for (let i = 0; i < pad; i++) html += '<div class="cal-cell empty"></div>';
+
+  const grid = $('calGrid');
+  grid.innerHTML = html;
+  grid.querySelectorAll('.cal-cell[data-d]').forEach(c => {
+    c.onclick = () => { calState.selected = c.dataset.d; renderCalendar(); };
+  });
+  renderCalendarDay(occ);
+}
+
+function renderCalendarDay(occ) {
+  const iso = calState.selected;
+  if (!iso) {
+    $('calDayTitle').textContent = '點選日期以查看當日預假人員';
+    $('calDayBody').innerHTML = '<div class="help">尚未選擇日期。</div>';
+    return;
+  }
+  const list = (occ || calOccupancy()).get(iso) || [];
+  $('calDayTitle').textContent = `${iso}（${list.length} 人預假）`;
+  if (!list.length) {
+    $('calDayBody').innerHTML = '<div class="help">本日尚無人預假。</div>';
+    return;
+  }
+  const sorted = list.slice().sort((a, b) => a.start.localeCompare(b.start));
+  const rows = sorted.map(x =>
+    `<tr><td>${escapeHtml(x.name)}</td><td>${x.start}</td><td>${x.end}</td></tr>`
+  ).join('');
+  $('calDayBody').innerHTML =
+    `<table class="cal-day-list"><thead><tr><th>姓名</th><th>起日</th><th>迄日</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function calMove(delta) {
+  let { year: y, month: m } = calState;
+  m += delta;
+  while (m < 1) { m += 12; y -= 1; }
+  while (m > 12) { m -= 12; y += 1; }
+  calState.year = y; calState.month = m; calState.selected = '';
+  renderCalendar();
+}
+
+function initCalendarMonth() {
+  const today = new Date();
+  calState.year = today.getFullYear();
+  calState.month = today.getMonth() + 1;
+  // If today's month has no records and the baked range is elsewhere, jump to first month with data.
+  const hasToday = BAKED.some(r => r._start_iso && r._start_iso.startsWith(`${calState.year}-${String(calState.month).padStart(2,'0')}`));
+  if (!hasToday) {
+    const dates = BAKED.map(r => r._start_iso).filter(Boolean).sort();
+    if (dates.length) {
+      const [y, m] = dates[0].split('-');
+      calState.year = Number(y); calState.month = Number(m);
+    }
+  }
+}
+
+function bindCalendar() {
+  $('calPrev').onclick = () => calMove(-1);
+  $('calNext').onclick = () => calMove(1);
+  $('calToday').onclick = () => {
+    const t = new Date();
+    calState.year = t.getFullYear(); calState.month = t.getMonth() + 1; calState.selected = '';
+    renderCalendar();
+  };
 }
 
 // =============== BIND ===============
@@ -950,6 +1109,7 @@ document.getElementById('unlockForm').addEventListener('submit', async (e) => {
 
 state.batch = loadBatch();
 bindView();
+bindCalendar();
 showRange();
 renderView();
 </script>
@@ -980,7 +1140,7 @@ MANAGER_HTML_BLOCK = """\
   </div>
   <div class="help" id="windowHelp">
     規則：單筆 4–10 天、每日最多 2 人、每人每年 12 次核准（每筆通過扣 1 點，依起日年份計算），
-    預假日須落在 <b>Gate Day</b> 至 <b>(Gate Day + 6 個月) 該週週日</b> 之間。
+    預假日須落在 <b>Gate Day</b> 至 <b>(Gate Day + 7 個月) 之次月首個週日</b> 之間。
     留空 Gate Day 則略過範圍檢查。
   </div>
 </div>

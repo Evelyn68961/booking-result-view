@@ -88,6 +88,29 @@
   .day-cell.tight { background: #fef3c7; color: var(--pending); }
   .day-cell .d { font-variant-numeric: tabular-nums; }
   .day-cell .n { font-weight: 600; }
+  .cal-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .cal-toolbar button { padding: 6px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 13px; }
+  .cal-toolbar button:hover { background: #f5f6fa; }
+  .cal-month-label { font-size: 16px; font-weight: 600; min-width: 130px; text-align: center; }
+  .cal-legend { display: flex; gap: 14px; margin-left: auto; font-size: 12px; color: var(--muted); align-items: center; }
+  .cal-legend .swatch { display: inline-block; width: 14px; height: 14px; border-radius: 3px; margin-right: 4px; vertical-align: middle; border: 1px solid var(--border); }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .cal-head { background: #f5f6fa; padding: 8px; text-align: center; font-size: 12px; color: var(--muted); font-weight: 600; }
+  .cal-cell { background: var(--panel); padding: 8px 6px; min-height: 60px; cursor: pointer; user-select: none; transition: filter 0.15s; }
+  .cal-cell:hover:not(.empty) { filter: brightness(0.94); }
+  .cal-cell.empty { background: #fafbfd; color: #cbd0db; cursor: default; }
+  .cal-cell .num { font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 500; }
+  .cal-cell .cnt { font-size: 11px; margin-top: 6px; color: var(--muted); }
+  .cal-cell.lvl0 { background: #f0fdf4; }
+  .cal-cell.lvl1 { background: #fef9c3; }
+  .cal-cell.lvl2 { background: #fecaca; }
+  .cal-cell.lvl0 .cnt { color: #16a34a; }
+  .cal-cell.lvl1 .cnt { color: #ca8a04; }
+  .cal-cell.lvl2 .cnt { color: #dc2626; font-weight: 600; }
+  .cal-cell.selected { outline: 2px solid var(--accent); outline-offset: -2px; z-index: 1; position: relative; }
+  .cal-day-list { width: 100%; font-size: 13px; border-collapse: collapse; }
+  .cal-day-list th, .cal-day-list td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .cal-day-list th { font-weight: 600; color: var(--muted); font-size: 12px; }
   .hidden { display: none !important; }
   .lock-card { max-width: 420px; margin: 60px auto; padding: 32px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; text-align: center; }
   .lock-card .icon { font-size: 32px; margin-bottom: 8px; }
@@ -111,6 +134,7 @@
   </div>
   <div class="tabs">
     <button class="tab active" data-tab="view">檢視紀錄</button>
+    <button class="tab" data-tab="calendar">預約日曆</button>
     <button class="tab" data-tab="manager">新申請審核（管理員）</button>
   </div>
 </header>
@@ -159,6 +183,28 @@
         <tbody id="body"></tbody>
       </table>
       <div class="pager" id="pager"></div>
+    </div>
+  </section>
+
+  <!-- ============ CALENDAR TAB ============ -->
+  <section id="tab-calendar" class="hidden">
+    <div class="panel">
+      <div class="cal-toolbar">
+        <button id="calPrev">‹ 上個月</button>
+        <span class="cal-month-label" id="calMonthLabel"></span>
+        <button id="calNext">下個月 ›</button>
+        <button id="calToday">回到今天</button>
+        <span class="cal-legend">
+          <span><span class="swatch" style="background:#f0fdf4;"></span>空</span>
+          <span><span class="swatch" style="background:#fef9c3;"></span>1 人</span>
+          <span><span class="swatch" style="background:#fecaca;"></span>2 人以上</span>
+        </span>
+      </div>
+      <div class="cal-grid" id="calGrid"></div>
+    </div>
+    <div class="panel">
+      <h2 id="calDayTitle">點選日期以查看當日預假人員</h2>
+      <div id="calDayBody" class="help">尚未選擇日期。</div>
     </div>
   </section>
 
@@ -254,17 +300,16 @@ function isWeekend(iso) {
   const dow = new Date(iso + 'T00:00:00').getDay();
   return dow === 0 || dow === 6;
 }
-// Compute round window end: gateDay + 6 months, then advance to the Sunday of that week (inclusive).
+// Compute round window end: first Sunday of the month after Gate Day + 7 months (inclusive).
 function roundWindow() {
   if (!state.gateDay) return null;
   const d = new Date(state.gateDay + 'T00:00:00');
-  const end = new Date(d);
-  end.setMonth(end.getMonth() + 6);
-  // Advance to the Sunday on or after `end`. JS getDay(): Sun=0, Mon=1 ... Sat=6.
-  // Days until Sunday = (7 - dow) % 7.
+  // Day-1 of (Gate Day's month + 8) — handles year rollover automatically.
+  const end = new Date(d.getFullYear(), d.getMonth() + 8, 1);
+  // Advance to the Sunday on or after the 1st. JS getDay(): Sun=0, Mon=1 ... Sat=6.
   const dow = end.getDay();
   end.setDate(end.getDate() + ((7 - dow) % 7));
-  const iso = (x) => x.toISOString().slice(0, 10);
+  const iso = (x) => new Date(x.getTime() - x.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
   return { from: state.gateDay, to: iso(end) };
 }
 function inRoundWindow(iso) {
@@ -748,10 +793,124 @@ function renderManager() {
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   $('tab-view').classList.toggle('hidden', name !== 'view');
+  $('tab-calendar').classList.toggle('hidden', name !== 'calendar');
   $('tab-manager').classList.toggle('hidden', name !== 'manager');
   if (name === 'view') renderView();
+  else if (name === 'calendar') renderCalendar();
   else if (MANAGER_UNLOCKED) renderManager();
   else { setTimeout(() => { const i = document.getElementById('pwInput'); if (i) i.focus(); }, 0); }
+}
+
+// =============== CALENDAR TAB ===============
+const CAL_FULL_THRESHOLD = 2;
+const calState = { year: 0, month: 0, selected: '' };
+
+function calOccupancy() {
+  const map = new Map();
+  for (const r of allRecords()) {
+    if (classifyStatus(r['審核結果']) !== 'pass') continue;
+    const s = r._start_iso, e = r._end_iso;
+    if (!s || !e || e < s) continue;
+    for (const d of iterDates(s, e)) {
+      if (!map.has(d)) map.set(d, []);
+      map.get(d).push({ name: r['你的名字'] || '(無姓名)', start: s, end: e });
+    }
+  }
+  return map;
+}
+
+function calLevel(count) {
+  if (count <= 0) return 0;
+  if (count < CAL_FULL_THRESHOLD) return 1;
+  return 2;
+}
+
+function renderCalendar() {
+  if (!calState.year) initCalendarMonth();
+  const occ = calOccupancy();
+  const y = calState.year, m = calState.month;
+  $('calMonthLabel').textContent = `${y} 年 ${String(m).padStart(2, '0')} 月`;
+
+  const startDow = new Date(y, m - 1, 1).getDay();
+  const daysInMonth = new Date(y, m, 0).getDate();
+
+  const heads = ['日','一','二','三','四','五','六'];
+  let html = heads.map(h => `<div class="cal-head">${h}</div>`).join('');
+  for (let i = 0; i < startDow; i++) html += '<div class="cal-cell empty"></div>';
+  for (let d = 1; d <= daysInMonth; d++) {
+    const iso = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const list = occ.get(iso) || [];
+    const cnt = list.length;
+    const lvl = calLevel(cnt);
+    const sel = iso === calState.selected ? ' selected' : '';
+    const label = cnt === 0 ? '空' : `${cnt} 人`;
+    html += `<div class="cal-cell lvl${lvl}${sel}" data-d="${iso}"><div class="num">${d}</div><div class="cnt">${label}</div></div>`;
+  }
+  const total = startDow + daysInMonth;
+  const pad = (7 - (total % 7)) % 7;
+  for (let i = 0; i < pad; i++) html += '<div class="cal-cell empty"></div>';
+
+  const grid = $('calGrid');
+  grid.innerHTML = html;
+  grid.querySelectorAll('.cal-cell[data-d]').forEach(c => {
+    c.onclick = () => { calState.selected = c.dataset.d; renderCalendar(); };
+  });
+  renderCalendarDay(occ);
+}
+
+function renderCalendarDay(occ) {
+  const iso = calState.selected;
+  if (!iso) {
+    $('calDayTitle').textContent = '點選日期以查看當日預假人員';
+    $('calDayBody').innerHTML = '<div class="help">尚未選擇日期。</div>';
+    return;
+  }
+  const list = (occ || calOccupancy()).get(iso) || [];
+  $('calDayTitle').textContent = `${iso}（${list.length} 人預假）`;
+  if (!list.length) {
+    $('calDayBody').innerHTML = '<div class="help">本日尚無人預假。</div>';
+    return;
+  }
+  const sorted = list.slice().sort((a, b) => a.start.localeCompare(b.start));
+  const rows = sorted.map(x =>
+    `<tr><td>${escapeHtml(x.name)}</td><td>${x.start}</td><td>${x.end}</td></tr>`
+  ).join('');
+  $('calDayBody').innerHTML =
+    `<table class="cal-day-list"><thead><tr><th>姓名</th><th>起日</th><th>迄日</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function calMove(delta) {
+  let { year: y, month: m } = calState;
+  m += delta;
+  while (m < 1) { m += 12; y -= 1; }
+  while (m > 12) { m -= 12; y += 1; }
+  calState.year = y; calState.month = m; calState.selected = '';
+  renderCalendar();
+}
+
+function initCalendarMonth() {
+  const today = new Date();
+  calState.year = today.getFullYear();
+  calState.month = today.getMonth() + 1;
+  // If today's month has no records and the baked range is elsewhere, jump to first month with data.
+  const hasToday = BAKED.some(r => r._start_iso && r._start_iso.startsWith(`${calState.year}-${String(calState.month).padStart(2,'0')}`));
+  if (!hasToday) {
+    const dates = BAKED.map(r => r._start_iso).filter(Boolean).sort();
+    if (dates.length) {
+      const [y, m] = dates[0].split('-');
+      calState.year = Number(y); calState.month = Number(m);
+    }
+  }
+}
+
+function bindCalendar() {
+  $('calPrev').onclick = () => calMove(-1);
+  $('calNext').onclick = () => calMove(1);
+  $('calToday').onclick = () => {
+    const t = new Date();
+    calState.year = t.getFullYear(); calState.month = t.getMonth() + 1; calState.selected = '';
+    renderCalendar();
+  };
 }
 
 // =============== BIND ===============
@@ -822,7 +981,7 @@ function showRange() {
 }
 
 // =============== MANAGER UNLOCK (PBKDF2 + AES-GCM) ===============
-const ENC = {"salt": "+IAtoVgdVPeMwDLC5qSxWg==", "iv": "rwygPHEonNNKF8Wb", "ct": "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", "iters": 200000};  // {salt, iv, ct, iters} all base64 (except iters)
+const ENC = {"salt": "0kovoLfS+nDAJWY5J08MMA==", "iv": "MCxFTBxYSyO/iHig", "ct": "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", "iters": 200000};  // {salt, iv, ct, iters} all base64 (except iters)
 let MANAGER_UNLOCKED = false;
 
 function b64ToBytes(s) {
@@ -870,6 +1029,7 @@ document.getElementById('unlockForm').addEventListener('submit', async (e) => {
 
 state.batch = loadBatch();
 bindView();
+bindCalendar();
 showRange();
 renderView();
 </script>
