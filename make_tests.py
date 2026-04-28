@@ -8,7 +8,7 @@ Manager settings to use throughout:
   單筆預假最多天數 = 10
   個人年度核准次數上限（點數）= 12
 
-Window: 2026-12-05 ~ 2027-06-06 (Sunday of the week containing Gate+6mo).
+Window: 2026-12-05 ~ 2027-08-01 (first Sunday of the month after Gate+7mo).
 
 Process the files in chronological order (filename order). After each batch,
 commit 通過 rows so they accumulate as historical baseline for the next month.
@@ -100,7 +100,7 @@ batches = {
         ("F3. 通過 — 測試年 11/12",            "測試年", D(2027,  5, 17), D(2027,  5, 20), "通過"),
         ("F4. 通過 — 測試年 12/12 剛好用完",    "測試年", D(2027,  5, 24), D(2027,  5, 27), "通過"),
         ("F5. 未通過 — 測試年 13 (年度點數不足)", "測試年", D(2027,  5, 31), D(2027,  6,  3), "未通過 - 年度點數不足"),
-        ("F6. 未通過 — 迄日晚於本輪結束",        "測試宙", D(2027,  6,  4), D(2027,  6, 10), "未通過 - 超出可預約範圍"),
+        ("F6. 未通過 — 迄日晚於本輪結束",        "測試宙", D(2027,  8,  2), D(2027,  8,  6), "未通過 - 超出可預約範圍"),
     ],
 }
 
