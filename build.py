@@ -360,6 +360,8 @@ const HEADERS = __HEADERS__;
 const STORAGE_KEY = 'booking-extra-records-v1';
 const BATCH_KEY = 'booking-batch-v1';
 const BAKED_PATCHES_KEY = 'booking-baked-patches-v1';
+const SHEET_URL_KEY = 'booking-sheet-url-v1';
+const SHEET_LAST_SYNC_KEY = 'booking-sheet-last-sync-v1';
 
 // =============== STATE ===============
 const state = {
@@ -1081,6 +1083,163 @@ function renderManager() {
     : `規則：單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。<br/>請填入 Gate Day 以啟用「可預約範圍」檢查。`;
   renderBatch();
   renderCommittedRecords();
+  renderSyncPanel();
+}
+
+// =============== GOOGLE SHEETS SYNC ===============
+function getSheetUrl() { return localStorage.getItem(SHEET_URL_KEY) || ''; }
+function setSheetUrl(u) { localStorage.setItem(SHEET_URL_KEY, u); }
+function getLastSync() { return localStorage.getItem(SHEET_LAST_SYNC_KEY) || ''; }
+function setLastSync(t) { localStorage.setItem(SHEET_LAST_SYNC_KEY, t); }
+
+// Build a flat row list representing the FULL effective record set (baked + patches + manager).
+// Each row carries a stable `id` so that pulls can reconstruct patches vs manager records.
+function buildSheetRecords() {
+  const patches = loadBakedPatches();
+  const out = [];
+  for (let i = 0; i < BAKED.length; i++) {
+    const p = patches[i] || {};
+    const merged = Object.assign({}, BAKED[i], p);
+    out.push({
+      id: `b:${i}`,
+      name: merged['你的名字'] || '',
+      status: merged['審核結果'] || '',
+      start: merged._start_iso || '',
+      end: merged._end_iso || '',
+      daysCat: merged['預假天數'] || '',
+      submittedAt: merged['送出時間'] || '',
+      source: 'baked',
+      deleted: p._deleted ? 'TRUE' : '',
+    });
+  }
+  for (const r of loadStored()) {
+    out.push({
+      id: `m:${r._id || ''}`,
+      name: r['你的名字'] || '',
+      status: r['審核結果'] || '',
+      start: r._start_iso || '',
+      end: r._end_iso || '',
+      daysCat: r['預假天數'] || '',
+      submittedAt: r['送出時間'] || '',
+      source: 'manager',
+      deleted: '',
+    });
+  }
+  return out;
+}
+
+async function pushToSheet() {
+  const url = getSheetUrl();
+  if (!url) { toast('請先設定 Web App URL'); return; }
+  const records = buildSheetRecords();
+  $('syncStatus').textContent = '上傳中…';
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'overwrite', records }),
+      redirect: 'follow',
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '伺服器回應錯誤');
+    setLastSync(new Date().toISOString());
+    renderSyncPanel();
+    toast(`已上傳 ${data.count} 筆到 Google Sheet`);
+  } catch (e) {
+    console.error(e);
+    toast('上傳失敗：' + e.message);
+    renderSyncPanel();
+  }
+}
+
+async function pullFromSheet() {
+  const url = getSheetUrl();
+  if (!url) { toast('請先設定 Web App URL'); return; }
+  if (!confirm('從 Google Sheet 載入會覆寫本機所有覆寫與手動加入紀錄。確定？')) return;
+  $('syncStatus').textContent = '下載中…';
+  try {
+    const res = await fetch(url, { method: 'GET', redirect: 'follow' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '讀取失敗');
+    const newPatches = {};
+    const newStored = [];
+    const FIELD_MAP = [['name','你的名字'], ['status','審核結果'], ['daysCat','預假天數'], ['submittedAt','送出時間']];
+    for (const row of (data.records || [])) {
+      const id = String(row.id || '');
+      const isDeleted = row.deleted === true || String(row.deleted).toUpperCase() === 'TRUE';
+      if (id.startsWith('b:')) {
+        const idx = Number(id.slice(2));
+        if (!Number.isInteger(idx) || idx < 0 || idx >= BAKED.length) continue;
+        const orig = BAKED[idx];
+        const patch = {};
+        if (isDeleted) patch._deleted = true;
+        for (const [from, to] of FIELD_MAP) {
+          const v = String(row[from] ?? '');
+          if (v !== String(orig[to] ?? '')) patch[to] = v;
+        }
+        const start = String(row.start ?? '');
+        const end   = String(row.end ?? '');
+        if (start !== String(orig._start_iso ?? '')) patch._start_iso = start || null;
+        if (end   !== String(orig._end_iso   ?? '')) patch._end_iso   = end   || null;
+        if (Object.keys(patch).length) newPatches[idx] = patch;
+      } else if (id.startsWith('m:')) {
+        if (isDeleted) continue;
+        newStored.push({
+          _id: id.slice(2) || uid(),
+          '你的名字': String(row.name ?? ''),
+          '審核結果': String(row.status ?? ''),
+          '預假【起日】': null, '預假【迄日】': null,
+          '送出時間': String(row.submittedAt ?? ''),
+          '預假天數': String(row.daysCat ?? ''),
+          '預假日': null, '特休': null, '時數': null,
+          '_start_iso': String(row.start ?? '') || null,
+          '_end_iso':   String(row.end   ?? '') || null,
+          '_source': 'manager',
+        });
+      }
+    }
+    saveBakedPatches(newPatches);
+    saveStored(newStored);
+    setLastSync(new Date().toISOString());
+    renderView();
+    if (MANAGER_UNLOCKED) renderManager();
+    toast(`已從 Google Sheet 載入 ${(data.records || []).length} 筆`);
+  } catch (e) {
+    console.error(e);
+    toast('載入失敗：' + e.message);
+    renderSyncPanel();
+  }
+}
+
+function renderSyncPanel() {
+  if (!MANAGER_UNLOCKED) return;
+  let panel = document.getElementById('syncPanel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'panel';
+    panel.id = 'syncPanel';
+    panel.innerHTML = `
+      <h2>🔗 Google Sheet 同步</h2>
+      <div class="help">與管理員共用一份 Google Sheet。設定 Apps Script Web App URL 後可雙向同步：上傳本機資料給管理員檢視/編輯，或從 Sheet 拉回最新內容。設定步驟見專案 <code>apps-script.gs</code>。</div>
+      <label class="help" style="display:flex; flex-direction:column; gap:4px; margin-top:10px;">
+        Web App URL（…/exec）
+        <input id="syncUrl" type="text" placeholder="https://script.google.com/macros/s/.../exec" style="padding:8px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; font-family:inherit;" />
+      </label>
+      <div class="actions-row">
+        <button class="primary" id="syncPush">📤 上傳到 Sheet</button>
+        <button class="ghost" id="syncPull">📥 從 Sheet 載入</button>
+        <div class="spacer"></div>
+        <span class="help" id="syncStatus"></span>
+      </div>
+    `;
+    document.getElementById('managerContent').appendChild(panel);
+    $('syncUrl').onchange = () => setSheetUrl($('syncUrl').value.trim());
+    $('syncPush').onclick = pushToSheet;
+    $('syncPull').onclick = pullFromSheet;
+  }
+  $('syncUrl').value = getSheetUrl();
+  const last = getLastSync();
+  $('syncStatus').textContent = last ? `上次同步：${new Date(last).toLocaleString()}` : '尚未同步';
 }
 
 // =============== EDIT MODAL ===============
