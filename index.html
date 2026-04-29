@@ -80,6 +80,10 @@
   .toast { position: fixed; bottom: 24px; right: 24px; background: #1a1f36; color: white; padding: 10px 16px; border-radius: 8px; font-size: 13px; opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 1000; }
   .toast.show { opacity: 1; }
   select.decision { padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; background: #fff; font-family: inherit; }
+  input.edit-cell, select.edit-cell { padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; background: #fff; font-family: inherit; width: 100%; min-width: 80px; }
+  input.edit-cell:focus, select.edit-cell:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79,70,229,0.15); }
+  input.edit-cell.edit-name { font-weight: 600; min-width: 80px; }
+  input.edit-cell.edit-date { min-width: 130px; font-variant-numeric: tabular-nums; }
   details.day-detail { margin-top: 10px; }
   details.day-detail summary { cursor: pointer; font-size: 13px; color: var(--accent); padding: 6px 0; }
   .day-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; margin-top: 8px; font-size: 12px; }
@@ -670,12 +674,19 @@ function renderBatch() {
     const predLabel = e.predicted.cls === 'pass' ? '通過'
       : e.predicted.cls === 'fail' ? `未通過 - ${e.predicted.reason}` : '—';
     const predPill = `<span class="pill ${e.predicted.cls === 'pass' ? 'pass' : 'fail'}">${escapeHtml(predLabel)}</span>`;
+    const catOptions = ['1-3天','4-10天','>10天'];
+    const hasStdCat = !e.daysCat || catOptions.includes(e.daysCat);
+    const catSelect = `<select class="edit-cell edit-cat" data-id="${e.id}">
+        <option value="" ${!e.daysCat?'selected':''}>未填</option>
+        ${catOptions.map(o => `<option value="${escapeHtml(o)}" ${e.daysCat===o?'selected':''}>${escapeHtml(o==='>10天'?'10天以上':o)}</option>`).join('')}
+        ${hasStdCat ? '' : `<option value="${escapeHtml(e.daysCat)}" selected>${escapeHtml(e.daysCat)}</option>`}
+      </select>`;
     return `<tr>
-      <td class="name">${escapeHtml(e.name)}</td>
-      <td class="date">${escapeHtml(e.start || '')}</td>
-      <td class="date">${escapeHtml(e.end || '')}</td>
+      <td><input class="edit-cell edit-name" type="text" data-id="${e.id}" value="${escapeHtml(e.name)}" placeholder="姓名" /></td>
+      <td><input class="edit-cell edit-date edit-start" type="date" data-id="${e.id}" value="${escapeHtml(e.start || '')}" /></td>
+      <td><input class="edit-cell edit-date edit-end" type="date" data-id="${e.id}" value="${escapeHtml(e.end || '')}" /></td>
       <td class="num">${days}</td>
-      <td>${escapeHtml(e.daysCat || '')}</td>
+      <td>${catSelect}</td>
       <td>${predPill}${conflictHtml}</td>
       <td>
         <select class="decision" data-id="${e.id}">
@@ -697,6 +708,21 @@ function renderBatch() {
       renderBatch();
     };
   });
+  function bindEdit(selector, field, transform) {
+    body.querySelectorAll(selector).forEach(el => {
+      el.onchange = () => {
+        const entry = state.batch.find(x => x.id === el.dataset.id);
+        if (!entry) return;
+        entry[field] = transform ? transform(el.value) : el.value;
+        saveBatch();
+        renderBatch();
+      };
+    });
+  }
+  bindEdit('input.edit-name',  'name',    v => v.trim());
+  bindEdit('input.edit-start', 'start',   v => v || null);
+  bindEdit('input.edit-end',   'end',     v => v || null);
+  bindEdit('select.edit-cat',  'daysCat');
   body.querySelectorAll('button[data-remove]').forEach(btn => {
     btn.onclick = () => {
       state.batch = state.batch.filter(x => x.id !== btn.dataset.remove);
@@ -776,6 +802,106 @@ function exportBatch() {
   XLSX.writeFile(wb, `審核結果_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
+function renderCommittedRecords() {
+  if (!MANAGER_UNLOCKED) return;
+  let panel = document.getElementById('committedPanel');
+  if (!panel) {
+    panel = document.createElement('div');
+    panel.className = 'panel';
+    panel.id = 'committedPanel';
+    panel.innerHTML = `
+      <h2>已加入紀錄（手動加入，<span id="committedCount">0</span> 筆）</h2>
+      <div class="help">已加入紀錄的手動項目。直接修改欄位即時生效；點刪除可移除單筆。</div>
+      <div class="table-wrap" style="border:none;">
+        <table>
+          <thead><tr>
+            <th class="no-sort">姓名</th>
+            <th class="no-sort">結果</th>
+            <th class="no-sort">拒絕原因</th>
+            <th class="no-sort">起日</th>
+            <th class="no-sort">迄日</th>
+            <th class="no-sort">類別</th>
+            <th class="no-sort">操作</th>
+          </tr></thead>
+          <tbody id="committedBody"></tbody>
+        </table>
+      </div>`;
+    document.getElementById('managerContent').appendChild(panel);
+  }
+
+  const stored = loadStored();
+  const managerIdx = [];
+  stored.forEach((r, i) => { if (r._source === 'manager') managerIdx.push(i); });
+  $('committedCount').textContent = managerIdx.length;
+  const body = $('committedBody');
+  if (!managerIdx.length) {
+    body.innerHTML = `<tr><td colspan="7" class="empty">尚未加入任何手動紀錄</td></tr>`;
+    return;
+  }
+  const catOptions = ['1-3天','4-10天','>10天'];
+  body.innerHTML = managerIdx.map(i => {
+    const r = stored[i];
+    const cls = classifyStatus(r['審核結果']);
+    const reason = reasonOf(r['審核結果']);
+    const cur = r['預假天數'] || '';
+    const hasStdCat = !cur || catOptions.includes(cur);
+    return `<tr>
+      <td><input class="edit-cell c-name" data-i="${i}" value="${escapeHtml(r['你的名字'] || '')}" /></td>
+      <td>
+        <select class="edit-cell c-status" data-i="${i}">
+          <option value="pass" ${cls==='pass'?'selected':''}>通過</option>
+          <option value="fail" ${cls==='fail'?'selected':''}>未通過</option>
+        </select>
+      </td>
+      <td><input class="edit-cell c-reason" data-i="${i}" value="${escapeHtml(reason)}" placeholder="${cls==='fail'?'必填':'(僅未通過時使用)'}" ${cls!=='fail'?'disabled':''} /></td>
+      <td><input class="edit-cell edit-date c-start" type="date" data-i="${i}" value="${escapeHtml(r._start_iso || '')}" /></td>
+      <td><input class="edit-cell edit-date c-end" type="date" data-i="${i}" value="${escapeHtml(r._end_iso || '')}" /></td>
+      <td>
+        <select class="edit-cell c-cat" data-i="${i}">
+          <option value="" ${!cur?'selected':''}>未填</option>
+          ${catOptions.map(o => `<option value="${escapeHtml(o)}" ${cur===o?'selected':''}>${escapeHtml(o==='>10天'?'10天以上':o)}</option>`).join('')}
+          ${hasStdCat ? '' : `<option value="${escapeHtml(cur)}" selected>${escapeHtml(cur)}</option>`}
+        </select>
+      </td>
+      <td><button class="danger" data-cdel="${i}">刪除</button></td>
+    </tr>`;
+  }).join('');
+
+  function update(el, fn) {
+    const arr = loadStored();
+    const r = arr[Number(el.dataset.i)];
+    if (!r) return;
+    fn(r, el.value);
+    saveStored(arr);
+    renderView();
+    renderCommittedRecords();
+    renderBatch();
+  }
+  body.querySelectorAll('input.c-name').forEach(el => el.onchange = () => update(el, (r, v) => r['你的名字'] = v.trim()));
+  body.querySelectorAll('input.c-start').forEach(el => el.onchange = () => update(el, (r, v) => r._start_iso = v || null));
+  body.querySelectorAll('input.c-end').forEach(el => el.onchange = () => update(el, (r, v) => r._end_iso = v || null));
+  body.querySelectorAll('select.c-cat').forEach(el => el.onchange = () => update(el, (r, v) => r['預假天數'] = v));
+  body.querySelectorAll('select.c-status').forEach(el => el.onchange = () => update(el, (r, v) => {
+    if (v === 'pass') r['審核結果'] = '通過';
+    else r['審核結果'] = '未通過 - ' + (reasonOf(r['審核結果']) || '管理員手動標記');
+  }));
+  body.querySelectorAll('input.c-reason').forEach(el => el.onchange = () => update(el, (r, v) => {
+    if (classifyStatus(r['審核結果']) === 'fail') {
+      r['審核結果'] = '未通過 - ' + (v.trim() || '管理員手動標記');
+    }
+  }));
+  body.querySelectorAll('button[data-cdel]').forEach(btn => btn.onclick = () => {
+    if (!confirm('確定刪除此筆手動加入紀錄？此動作不會影響原始 Excel。')) return;
+    const arr = loadStored();
+    arr.splice(Number(btn.dataset.cdel), 1);
+    saveStored(arr);
+    renderView();
+    renderCommittedRecords();
+    renderBatch();
+    toast('已刪除');
+  });
+}
+
 function renderManager() {
   $('quota').value = state.quota;
   $('minDays').value = state.minDays;
@@ -787,6 +913,7 @@ function renderManager() {
     ? `<b>本輪可預約範圍：${w.from} ～ ${w.to}</b>（含）。單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。`
     : `規則：單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。<br/>請填入 Gate Day 以啟用「可預約範圍」檢查。`;
   renderBatch();
+  renderCommittedRecords();
 }
 
 // =============== TAB SWITCHING ===============
@@ -1008,9 +1135,9 @@ async function unlockManager(password) {
   const html = new TextDecoder().decode(plain);
   document.getElementById('managerContent').innerHTML = html;
   document.getElementById('lockScreen').classList.add('hidden');
+  MANAGER_UNLOCKED = true;
   bindManager();
   renderManager();
-  MANAGER_UNLOCKED = true;
 }
 
 document.getElementById('unlockForm').addEventListener('submit', async (e) => {
