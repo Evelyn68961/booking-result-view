@@ -164,6 +164,19 @@ HTML_TEMPLATE = r"""<!doctype html>
   input.edit-cell:focus, select.edit-cell:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79,70,229,0.15); }
   input.edit-cell.edit-name { font-weight: 600; min-width: 80px; }
   input.edit-cell.edit-date { min-width: 130px; font-variant-numeric: tabular-nums; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(15,18,30,0.45); display: flex; align-items: center; justify-content: center; z-index: 1100; }
+  .modal-overlay.hidden { display: none !important; }
+  .modal-card { background: var(--panel); border-radius: 12px; padding: 22px; max-width: 460px; width: 92%; box-shadow: 0 10px 30px rgba(0,0,0,0.18); }
+  .modal-card h3 { margin: 0 0 6px; font-size: 16px; }
+  .modal-card .modal-meta { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .modal-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .modal-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  .modal-fields label.wide { grid-column: span 2; }
+  .modal-fields input, .modal-fields select { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; font-family: inherit; }
+  .modal-fields input:focus, .modal-fields select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,70,229,0.15); }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+  td.actions { white-space: nowrap; }
+  td.actions button { margin-right: 4px; }
   details.day-detail { margin-top: 10px; }
   details.day-detail summary { cursor: pointer; font-size: 13px; color: var(--accent); padding: 6px 0; }
   .day-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px; margin-top: 8px; font-size: 12px; }
@@ -310,11 +323,43 @@ HTML_TEMPLATE = r"""<!doctype html>
 
 <div class="toast" id="toast"></div>
 
+<div id="editModal" class="modal-overlay hidden">
+  <div class="modal-card">
+    <h3>編輯紀錄</h3>
+    <div class="modal-meta" id="emMeta"></div>
+    <div class="modal-fields">
+      <label class="wide">姓名 <input id="emName" type="text" /></label>
+      <label>結果
+        <select id="emStatus">
+          <option value="pass">通過</option>
+          <option value="fail">未通過</option>
+        </select>
+      </label>
+      <label>類別
+        <select id="emCat">
+          <option value="">未填</option>
+          <option value="1-3天">1-3天</option>
+          <option value="4-10天">4-10天</option>
+          <option value=">10天">10天以上</option>
+        </select>
+      </label>
+      <label class="wide">拒絕原因 <input id="emReason" type="text" placeholder="(僅未通過時使用)" /></label>
+      <label>起日 <input id="emStart" type="date" /></label>
+      <label>迄日 <input id="emEnd" type="date" /></label>
+    </div>
+    <div class="modal-actions">
+      <button class="ghost" id="emCancel">取消</button>
+      <button class="primary" id="emSave">儲存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const BAKED = __DATA__;
 const HEADERS = __HEADERS__;
 const STORAGE_KEY = 'booking-extra-records-v1';
 const BATCH_KEY = 'booking-batch-v1';
+const BAKED_PATCHES_KEY = 'booking-baked-patches-v1';
 
 // =============== STATE ===============
 const state = {
@@ -331,8 +376,13 @@ const $ = (id) => document.getElementById(id);
 
 // =============== STORAGE ===============
 function loadStored() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
-  catch { return []; }
+  let arr;
+  try { arr = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
+  catch { arr = []; }
+  let dirty = false;
+  for (const r of arr) { if (!r._id) { r._id = uid(); dirty = true; } }
+  if (dirty) localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
+  return arr;
 }
 function saveStored(arr) { localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); }
 function loadBatch() {
@@ -340,9 +390,27 @@ function loadBatch() {
   catch { return []; }
 }
 function saveBatch() { localStorage.setItem(BATCH_KEY, JSON.stringify(state.batch)); }
+function loadBakedPatches() {
+  try { return JSON.parse(localStorage.getItem(BAKED_PATCHES_KEY) || '{}'); }
+  catch { return {}; }
+}
+function saveBakedPatches(p) { localStorage.setItem(BAKED_PATCHES_KEY, JSON.stringify(p)); }
 
-// All records (baked + manager-committed) used for both views and quota math.
-function allRecords() { return BAKED.concat(loadStored()); }
+// Build effective baked records: BAKED merged with patches (edits/deletes) from localStorage.
+// Each row carries `_baked_idx` so the UI can target the correct slot for further edits.
+function effectiveBaked() {
+  const patches = loadBakedPatches();
+  const out = [];
+  for (let i = 0; i < BAKED.length; i++) {
+    const p = patches[i];
+    if (p && p._deleted) continue;
+    out.push(p ? Object.assign({}, BAKED[i], p, { _baked_idx: i }) : Object.assign({}, BAKED[i], { _baked_idx: i }));
+  }
+  return out;
+}
+
+// All records (effective baked + manager-committed) used for both views and quota math.
+function allRecords() { return effectiveBaked().concat(loadStored()); }
 
 // =============== HELPERS ===============
 function classifyStatus(s) {
@@ -569,11 +637,13 @@ function sortRows(rows) {
 
 function renderHead() {
   const tr = $('head');
-  tr.innerHTML = COLS.map(c => {
+  const cells = COLS.map(c => {
     const sortedCls = state.sortKey === c.key ? (state.sortDir === 'asc' ? 'sorted-asc' : 'sorted-desc') : '';
     return `<th class="${sortedCls}" data-key="${c.key}">${escapeHtml(c.label)}</th>`;
-  }).join('');
-  tr.querySelectorAll('th').forEach(th => {
+  });
+  if (MANAGER_UNLOCKED) cells.push('<th class="no-sort">操作</th>');
+  tr.innerHTML = cells.join('');
+  tr.querySelectorAll('th[data-key]').forEach(th => {
     th.onclick = () => {
       const k = th.dataset.key;
       if (state.sortKey === k) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
@@ -583,11 +653,18 @@ function renderHead() {
   });
 }
 
+function recordHandle(r) {
+  if (r._source === 'manager' && r._id) return `m:${r._id}`;
+  if (r._baked_idx !== undefined) return `b:${r._baked_idx}`;
+  return '';
+}
+
 function renderBody(rows) {
   const body = $('body');
-  if (!rows.length) { body.innerHTML = `<tr><td colspan="${COLS.length}" class="empty">沒有符合條件的紀錄</td></tr>`; return; }
+  const colCount = COLS.length + (MANAGER_UNLOCKED ? 1 : 0);
+  if (!rows.length) { body.innerHTML = `<tr><td colspan="${colCount}" class="empty">沒有符合條件的紀錄</td></tr>`; return; }
   body.innerHTML = rows.map(r => {
-    return '<tr>' + COLS.map(c => {
+    const cells = COLS.map(c => {
       let v = r[c.key];
       if (c.key === '審核結果') {
         const cls = classifyStatus(v);
@@ -599,8 +676,18 @@ function renderBody(rows) {
       }
       if (v === null || v === undefined || v === '') v = '';
       return `<td class="${c.cls || ''}">${escapeHtml(v)}</td>`;
-    }).join('') + '</tr>';
+    });
+    if (MANAGER_UNLOCKED) {
+      const h = recordHandle(r);
+      cells.push(`<td class="actions"><button class="ghost" data-edit="${h}">編輯</button><button class="danger" data-del="${h}">刪除</button></td>`);
+    }
+    return '<tr>' + cells.join('') + '</tr>';
   }).join('');
+
+  if (MANAGER_UNLOCKED) {
+    body.querySelectorAll('button[data-edit]').forEach(b => b.onclick = () => openEditModal(b.dataset.edit));
+    body.querySelectorAll('button[data-del]').forEach(b => b.onclick = () => deleteRecordByHandle(b.dataset.del));
+  }
 }
 
 function renderSummary(filtered) {
@@ -996,6 +1083,117 @@ function renderManager() {
   renderCommittedRecords();
 }
 
+// =============== EDIT MODAL ===============
+const editModalState = { handle: null };
+
+function findRecordByHandle(h) {
+  if (!h) return null;
+  if (h.startsWith('b:')) {
+    const idx = Number(h.slice(2));
+    return effectiveBaked().find(x => x._baked_idx === idx) || null;
+  }
+  if (h.startsWith('m:')) {
+    return loadStored().find(x => x._id === h.slice(2)) || null;
+  }
+  return null;
+}
+
+function openEditModal(h) {
+  const r = findRecordByHandle(h);
+  if (!r) { toast('找不到紀錄'); return; }
+  editModalState.handle = h;
+  const isBaked = h.startsWith('b:');
+  $('emMeta').textContent = isBaked ? '原始紀錄（編輯後僅在本機覆寫，不影響原 Excel）' : '手動加入紀錄';
+  $('emName').value = r['你的名字'] || '';
+  const cls = classifyStatus(r['審核結果']);
+  $('emStatus').value = cls === 'pass' ? 'pass' : 'fail';
+  $('emReason').value = reasonOf(r['審核結果']);
+  $('emStart').value = r._start_iso || '';
+  $('emEnd').value = r._end_iso || '';
+  $('emCat').value = r['預假天數'] || '';
+  $('editModal').classList.remove('hidden');
+  setTimeout(() => $('emName').focus(), 0);
+}
+
+function closeEditModal() {
+  editModalState.handle = null;
+  $('editModal').classList.add('hidden');
+}
+
+function saveEditModal() {
+  const h = editModalState.handle;
+  if (!h) return;
+  const name = $('emName').value.trim();
+  const start = $('emStart').value || null;
+  const end = $('emEnd').value || null;
+  if (!name) { toast('姓名不可空白'); return; }
+  if (start && end && end < start) { toast('迄日早於起日'); return; }
+  const status = $('emStatus').value;
+  const reason = $('emReason').value.trim();
+  const cat = $('emCat').value;
+  const statusStr = status === 'pass' ? '通過' : '未通過 - ' + (reason || '管理員手動標記');
+
+  if (h.startsWith('b:')) {
+    const idx = Number(h.slice(2));
+    const patches = loadBakedPatches();
+    patches[idx] = Object.assign({}, patches[idx] || {}, {
+      '你的名字': name,
+      '審核結果': statusStr,
+      '預假天數': cat,
+      _start_iso: start,
+      _end_iso: end,
+    });
+    delete patches[idx]._deleted;
+    saveBakedPatches(patches);
+  } else if (h.startsWith('m:')) {
+    const arr = loadStored();
+    const r = arr.find(x => x._id === h.slice(2));
+    if (!r) { toast('找不到紀錄'); return; }
+    r['你的名字'] = name;
+    r['審核結果'] = statusStr;
+    r['預假天數'] = cat;
+    r._start_iso = start;
+    r._end_iso = end;
+    saveStored(arr);
+  }
+  closeEditModal();
+  renderView();
+  if (MANAGER_UNLOCKED) renderManager();
+  toast('已儲存');
+}
+
+function deleteRecordByHandle(h) {
+  const r = findRecordByHandle(h);
+  if (!r) return;
+  const isBaked = h.startsWith('b:');
+  const label = `${r['你的名字'] || '(無姓名)'}（${r._start_iso || '?'} ~ ${r._end_iso || '?'}）`;
+  if (!confirm(`確定刪除：${label}？${isBaked ? '\n此動作只在本機覆寫，不會修改原始 Excel；可日後重新整理修補表移除覆寫。' : ''}`)) return;
+  if (isBaked) {
+    const idx = Number(h.slice(2));
+    const patches = loadBakedPatches();
+    patches[idx] = Object.assign({}, patches[idx] || {}, { _deleted: true });
+    saveBakedPatches(patches);
+  } else if (h.startsWith('m:')) {
+    const arr = loadStored().filter(x => x._id !== h.slice(2));
+    saveStored(arr);
+  }
+  renderView();
+  if (MANAGER_UNLOCKED) renderManager();
+  toast('已刪除');
+}
+
+function bindEditModal() {
+  $('emCancel').onclick = closeEditModal;
+  $('emSave').onclick = saveEditModal;
+  $('editModal').addEventListener('click', (e) => { if (e.target.id === 'editModal') closeEditModal(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('editModal').classList.contains('hidden')) closeEditModal();
+  });
+  $('emStatus').addEventListener('change', () => {
+    $('emReason').disabled = $('emStatus').value !== 'fail';
+  });
+}
+
 // =============== TAB SWITCHING ===============
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
@@ -1218,6 +1416,7 @@ async function unlockManager(password) {
   MANAGER_UNLOCKED = true;
   bindManager();
   renderManager();
+  renderView();
 }
 
 document.getElementById('unlockForm').addEventListener('submit', async (e) => {
@@ -1237,6 +1436,7 @@ document.getElementById('unlockForm').addEventListener('submit', async (e) => {
 state.batch = loadBatch();
 bindView();
 bindCalendar();
+bindEditModal();
 showRange();
 renderView();
 </script>
