@@ -12,13 +12,19 @@ A single-file HTML viewer + manager-approval helper for the existing 預假 Exce
 
 Day-by-day occupancy for the touched dates is shown so it's obvious which days are full.
 
+**Per-record edit / delete** — when the manager tab is unlocked, every row in the View tab gets 編輯 / 刪除 buttons. Edits to baked records become a localStorage "patches" overlay (the original xlsx is never mutated). Manager-added records are edited or removed in place. A separate panel in the manager tab lists the manual additions for inline tweaking, plus a bulk-wipe button.
+
+**Optional Google Sheet sync** — the manager tab has a 🔗 Google Sheet 同步 panel. Pasting an Apps Script Web App URL ([apps-script.gs](apps-script.gs) is the backend) gives you a shared sheet your managers can view/edit directly. The app auto-pushes local changes every 2 minutes and auto-pulls when the browser tab regains focus; manual 上傳 / 載入 buttons are also provided.
+
 ## Files
 
 | File | Purpose |
 |---|---|
-| [index.html](index.html) | Built output. Open directly in a browser — no server needed. |
+| [index.html](index.html) | Built output. Open directly in a browser — no server needed (sync requires http(s)). |
 | [build.py](build.py) | Reads the xlsx, encrypts the manager block, and writes `index.html`. |
 | [booking_rules.md](booking_rules.md) | The approval rules the manager tab enforces. |
+| [apps-script.gs](apps-script.gs) | Google Apps Script backend for the optional Sheet sync. Paste into the script editor of your shared sheet. |
+| [spec.md](spec.md) | Architecture / data model / sync semantics — read this when changing internals. |
 | [make_tests.py](make_tests.py) | Generates `batch-YYYY-MM.xlsx` files — one per month — that simulate the申請 batches the manager would receive. |
 | `202401-202604預假紀錄.xlsx` | Source data baked into the page. |
 | `batch-*.xlsx` | Monthly申請 batches for trying the manager tab. Process in filename order, committing 通過 rows between batches so history accumulates. |
@@ -40,7 +46,17 @@ This is obfuscation of the controls, not protection of the data — the baked re
 
 ## Storage
 
-Manager-committed rows and in-progress batches live in `localStorage` (`booking-extra-records-v1`, `booking-batch-v1`). They survive reloads but are per-browser. The 「移除所有已儲存的新增紀錄」button in the manager tab clears them; the original baked xlsx is never modified.
+Five localStorage keys (all per-browser, per-device):
+
+| Key | Holds |
+|---|---|
+| `booking-extra-records-v1` | Manager-added records (post-commit). |
+| `booking-batch-v1` | In-progress batch (pre-commit scratch). |
+| `booking-baked-patches-v1` | Edits / tombstones for the baked xlsx records. |
+| `booking-sheet-url-v1` | Apps Script Web App URL (if Sheet sync configured). |
+| `booking-sheet-last-sync-v1` | ISO timestamp of last successful sync. |
+
+The 「移除所有已儲存的新增紀錄」button clears `booking-extra-records-v1`; the original baked xlsx is never modified. To survive a browser-cache wipe or to share state across devices, configure the Google Sheet sync — see [spec.md](spec.md) and [apps-script.gs](apps-script.gs).
 
 ## Test scenarios
 
