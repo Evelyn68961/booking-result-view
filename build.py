@@ -372,6 +372,7 @@ const state = {
   quota: 2, minDays: 4, maxDays: 10, yearlyPoints: 12,
   gateDay: '',
   batch: [],
+  dirty: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -386,7 +387,7 @@ function loadStored() {
   if (dirty) localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
   return arr;
 }
-function saveStored(arr) { localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); }
+function saveStored(arr) { localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); markDirty(); }
 function loadBatch() {
   try { return JSON.parse(localStorage.getItem(BATCH_KEY) || '[]'); }
   catch { return []; }
@@ -396,7 +397,7 @@ function loadBakedPatches() {
   try { return JSON.parse(localStorage.getItem(BAKED_PATCHES_KEY) || '{}'); }
   catch { return {}; }
 }
-function saveBakedPatches(p) { localStorage.setItem(BAKED_PATCHES_KEY, JSON.stringify(p)); }
+function saveBakedPatches(p) { localStorage.setItem(BAKED_PATCHES_KEY, JSON.stringify(p)); markDirty(); }
 
 // Build effective baked records: BAKED merged with patches (edits/deletes) from localStorage.
 // Each row carries `_baked_idx` so the UI can target the correct slot for further edits.
@@ -1092,6 +1093,22 @@ function setSheetUrl(u) { localStorage.setItem(SHEET_URL_KEY, u); }
 function getLastSync() { return localStorage.getItem(SHEET_LAST_SYNC_KEY) || ''; }
 function setLastSync(t) { localStorage.setItem(SHEET_LAST_SYNC_KEY, t); }
 
+function markDirty() { state.dirty = true; updateSyncStatus(); }
+function clearDirty() { state.dirty = false; updateSyncStatus(); }
+function updateSyncStatus() {
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  const last = getLastSync();
+  const lastStr = last ? new Date(last).toLocaleString() : '尚未同步';
+  if (state.dirty) {
+    el.textContent = `● 有未同步變更（最後上傳：${lastStr}）`;
+    el.style.color = 'var(--pending)';
+  } else {
+    el.textContent = `上次同步：${lastStr}`;
+    el.style.color = '';
+  }
+}
+
 // Build a flat row list representing the FULL effective record set (baked + patches + manager).
 // Each row carries a stable `id` so that pulls can reconstruct patches vs manager records.
 function buildSheetRecords() {
@@ -1128,11 +1145,12 @@ function buildSheetRecords() {
   return out;
 }
 
-async function pushToSheet() {
+async function pushToSheet(quiet = false) {
   const url = getSheetUrl();
-  if (!url) { toast('請先設定 Web App URL'); return; }
+  if (!url) { if (!quiet) toast('請先設定 Web App URL'); return; }
   const records = buildSheetRecords();
-  $('syncStatus').textContent = '上傳中…';
+  const statusEl = document.getElementById('syncStatus');
+  if (statusEl) statusEl.textContent = '上傳中…';
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -1143,20 +1161,22 @@ async function pushToSheet() {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || '伺服器回應錯誤');
     setLastSync(new Date().toISOString());
-    renderSyncPanel();
-    toast(`已上傳 ${data.count} 筆到 Google Sheet`);
+    clearDirty();
+    if (!quiet) toast(`已上傳 ${data.count} 筆到 Google Sheet`);
   } catch (e) {
     console.error(e);
     toast('上傳失敗：' + e.message);
-    renderSyncPanel();
+    updateSyncStatus();
+    throw e;
   }
 }
 
-async function pullFromSheet() {
+async function pullFromSheet(quiet = false) {
   const url = getSheetUrl();
-  if (!url) { toast('請先設定 Web App URL'); return; }
-  if (!confirm('從 Google Sheet 載入會覆寫本機所有覆寫與手動加入紀錄。確定？')) return;
-  $('syncStatus').textContent = '下載中…';
+  if (!url) { if (!quiet) toast('請先設定 Web App URL'); return; }
+  if (!quiet && !confirm('從 Google Sheet 載入會覆寫本機所有覆寫與手動加入紀錄。確定？')) return;
+  const statusEl = document.getElementById('syncStatus');
+  if (statusEl) statusEl.textContent = '下載中…';
   try {
     const res = await fetch(url, { method: 'GET', redirect: 'follow' });
     const data = await res.json();
@@ -1201,14 +1221,45 @@ async function pullFromSheet() {
     saveBakedPatches(newPatches);
     saveStored(newStored);
     setLastSync(new Date().toISOString());
+    clearDirty();
     renderView();
     if (MANAGER_UNLOCKED) renderManager();
-    toast(`已從 Google Sheet 載入 ${(data.records || []).length} 筆`);
+    if (!quiet) toast(`已從 Google Sheet 載入 ${(data.records || []).length} 筆`);
   } catch (e) {
     console.error(e);
     toast('載入失敗：' + e.message);
-    renderSyncPanel();
+    updateSyncStatus();
+    throw e;
   }
+}
+
+// Auto-sync: push every 2 minutes if dirty, pull when tab regains focus.
+let autoSyncBusy = false;
+let autoPushIntervalId = null;
+async function autoSyncTick(reason) {
+  if (autoSyncBusy) return;
+  if (!getSheetUrl()) return;
+  autoSyncBusy = true;
+  try {
+    if (reason === 'focus') {
+      // Push local edits first so they're not clobbered, then pull latest.
+      if (state.dirty) { try { await pushToSheet(true); } catch (e) { console.error('auto-push failed', e); } }
+      try { await pullFromSheet(true); } catch (e) { console.error('auto-pull failed', e); }
+    } else { // 'tick'
+      if (state.dirty) { try { await pushToSheet(true); } catch (e) { console.error('auto-push failed', e); } }
+    }
+  } finally {
+    autoSyncBusy = false;
+  }
+}
+function startAutoSync() {
+  if (autoPushIntervalId) clearInterval(autoPushIntervalId);
+  autoPushIntervalId = setInterval(() => autoSyncTick('tick'), 2 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') autoSyncTick('focus');
+  });
+  window.addEventListener('focus', () => autoSyncTick('focus'));
+  if (getSheetUrl()) setTimeout(() => autoSyncTick('focus'), 200);
 }
 
 function renderSyncPanel() {
@@ -1220,7 +1271,7 @@ function renderSyncPanel() {
     panel.id = 'syncPanel';
     panel.innerHTML = `
       <h2>🔗 Google Sheet 同步</h2>
-      <div class="help">與管理員共用一份 Google Sheet。設定 Apps Script Web App URL 後可雙向同步：上傳本機資料給管理員檢視/編輯，或從 Sheet 拉回最新內容。設定步驟見專案 <code>apps-script.gs</code>。</div>
+      <div class="help">與管理員共用一份 Google Sheet。設定 Web App URL 後：每 2 分鐘自動上傳本機變更，切回此頁時自動下載最新資料。也可手動觸發。設定步驟見專案 <code>apps-script.gs</code>。</div>
       <label class="help" style="display:flex; flex-direction:column; gap:4px; margin-top:10px;">
         Web App URL（…/exec）
         <input id="syncUrl" type="text" placeholder="https://script.google.com/macros/s/.../exec" style="padding:8px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; font-family:inherit;" />
@@ -1234,12 +1285,11 @@ function renderSyncPanel() {
     `;
     document.getElementById('managerContent').appendChild(panel);
     $('syncUrl').onchange = () => setSheetUrl($('syncUrl').value.trim());
-    $('syncPush').onclick = pushToSheet;
-    $('syncPull').onclick = pullFromSheet;
+    $('syncPush').onclick = () => pushToSheet().catch(() => {});
+    $('syncPull').onclick = () => pullFromSheet().catch(() => {});
   }
   $('syncUrl').value = getSheetUrl();
-  const last = getLastSync();
-  $('syncStatus').textContent = last ? `上次同步：${new Date(last).toLocaleString()}` : '尚未同步';
+  updateSyncStatus();
 }
 
 // =============== EDIT MODAL ===============
@@ -1598,6 +1648,7 @@ bindCalendar();
 bindEditModal();
 showRange();
 renderView();
+startAutoSync();
 </script>
 </body>
 </html>
