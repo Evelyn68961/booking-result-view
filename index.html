@@ -282,6 +282,7 @@ const BATCH_KEY = 'booking-batch-v1';
 const BAKED_PATCHES_KEY = 'booking-baked-patches-v1';
 const SHEET_URL_KEY = 'booking-sheet-url-v1';
 const SHEET_LAST_SYNC_KEY = 'booking-sheet-last-sync-v1';
+const QUOTA_CONFIG_KEY = 'booking-quota-config-v1';
 
 // =============== STATE ===============
 const state = {
@@ -289,7 +290,8 @@ const state = {
   from: '', to: '',
   sortKey: '_start_iso', sortDir: 'desc',
   page: 1, pageSize: 50,
-  quota: 2, minDays: 4, maxDays: 10, yearlyPoints: 12,
+  weekdayQuota: 2, weekendQuota: 4, quotaOverrides: [],
+  minDays: 4, maxDays: 10, yearlyPoints: 12,
   gateDay: '',
   batch: [],
   dirty: false,
@@ -319,6 +321,33 @@ function loadBatch() {
   } catch { return []; }
 }
 function saveBatch() { localStorage.setItem(BATCH_KEY, JSON.stringify(state.batch)); }
+function loadQuotaConfig() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(QUOTA_CONFIG_KEY) || 'null');
+    if (!raw) return null;
+    return {
+      weekday: Math.max(0, Number(raw.weekday) || 0),
+      weekend: Math.max(0, Number(raw.weekend) || 0),
+      overrides: Array.isArray(raw.overrides) ? raw.overrides.map(o => ({
+        id: o.id || uid(),
+        from: String(o.from || ''),
+        to: String(o.to || ''),
+        quota: Math.max(0, Number(o.quota) || 0),
+        note: String(o.note || ''),
+        ts: Number(o.ts) || 0,
+      })).filter(o => o.from && o.to) : [],
+    };
+  } catch { return null; }
+}
+function saveQuotaConfig() {
+  const payload = {
+    weekday: state.weekdayQuota,
+    weekend: state.weekendQuota,
+    overrides: state.quotaOverrides,
+  };
+  localStorage.setItem(QUOTA_CONFIG_KEY, JSON.stringify(payload));
+  markDirty();
+}
 function loadBakedPatches() {
   try { return JSON.parse(localStorage.getItem(BAKED_PATCHES_KEY) || '{}'); }
   catch { return {}; }
@@ -377,6 +406,26 @@ function* iterDates(a, b) {
     yield d.toISOString().slice(0, 10);
   }
 }
+// Per-date daily cap. Overrides win over weekday/weekend defaults; among
+// overrides, the narrower range wins (carve-outs beat baselines), with the
+// most-recently-added override breaking ties.
+function quotaForDate(iso) {
+  let best = null;
+  let bestSpan = Infinity;
+  let bestTs = -Infinity;
+  for (const o of state.quotaOverrides) {
+    if (!o.from || !o.to) continue;
+    if (iso < o.from || iso > o.to) continue;
+    const span = daysInRange(o.from, o.to);
+    const ts = o.ts || 0;
+    if (span < bestSpan || (span === bestSpan && ts >= bestTs)) {
+      best = o; bestSpan = span; bestTs = ts;
+    }
+  }
+  if (best) return Math.max(0, Number(best.quota) || 0);
+  return isWeekend(iso) ? state.weekendQuota : state.weekdayQuota;
+}
+
 function isWeekend(iso) {
   const dow = new Date(iso + 'T00:00:00').getDay();
   return dow === 0 || dow === 6;
@@ -521,7 +570,8 @@ function predict(entry, dayMap, personYearUsed) {
   const conflicts = [];
   for (const d of iterDates(entry.start, entry.end)) {
     const cur = dayMap.get(d) || 0;
-    if (cur >= state.quota) conflicts.push({ d, cur });
+    const cap = quotaForDate(d);
+    if (cur >= cap) conflicts.push({ d, cur, cap });
   }
   if (conflicts.length) {
     return { cls: 'fail', reason: '已超過上限人數', conflicts };
@@ -813,7 +863,7 @@ function renderBatch() {
     const pillCls = eff === 'pass' ? 'pass' : eff === 'fail' ? 'fail' : 'other';
     const pillLabel = eff === 'pass' ? '通過' : eff === 'fail' ? '未通過' : '—';
     const conflictHtml = e.predicted.conflicts.length
-      ? `<div class="conflict-list">已滿日：${e.predicted.conflicts.map(c => `${c.d}(${c.cur})`).join(', ')}</div>`
+      ? `<div class="conflict-list">已滿日：${e.predicted.conflicts.map(c => `${c.d}(${c.cur}/${c.cap ?? '-'})`).join(', ')}</div>`
       : '';
     const predLabel = e.predicted.cls === 'pass' ? '通過'
       : e.predicted.cls === 'fail' ? `未通過 - ${e.predicted.reason}` : '—';
@@ -897,9 +947,10 @@ function renderDayGrid() {
   const sorted = Array.from(dates).sort();
   $('dayGrid').innerHTML = sorted.map(d => {
     const n = map.get(d) || 0;
-    const cls = n >= state.quota ? 'full' : (n === state.quota - 1 ? 'tight' : '');
+    const cap = quotaForDate(d);
+    const cls = n >= cap ? 'full' : (n === cap - 1 ? 'tight' : '');
     const dow = ['日','一','二','三','四','五','六'][new Date(d+'T00:00:00').getDay()];
-    return `<div class="day-cell ${cls}"><div class="d">${d} (${dow})</div><div class="n">${n} / ${state.quota}</div></div>`;
+    return `<div class="day-cell ${cls}"><div class="d">${d} (${dow})</div><div class="n">${n} / ${cap}</div></div>`;
   }).join('');
 }
 
@@ -1053,18 +1104,60 @@ function renderCommittedRecords() {
   });
 }
 
+function renderQuotaOverrides() {
+  const body = $('quotaOverrideBody');
+  if (!body) return;
+  if (!state.quotaOverrides.length) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">尚未設定任何例外</td></tr>`;
+    return;
+  }
+  const sorted = state.quotaOverrides
+    .map((o, i) => ({ o, i }))
+    .sort((a, b) => (a.o.from || '').localeCompare(b.o.from || '') || a.i - b.i);
+  body.innerHTML = sorted.map(({ o }) => `<tr>
+    <td><input class="edit-cell qov-from" type="date" data-id="${o.id}" value="${escapeHtml(o.from || '')}" /></td>
+    <td><input class="edit-cell qov-to" type="date" data-id="${o.id}" value="${escapeHtml(o.to || '')}" /></td>
+    <td><input class="edit-cell qov-quota" type="number" min="0" data-id="${o.id}" value="${o.quota}" /></td>
+    <td><input class="edit-cell qov-note" type="text" data-id="${o.id}" value="${escapeHtml(o.note || '')}" placeholder="（選填）" /></td>
+    <td><button class="ghost" data-qov-remove="${o.id}">移除</button></td>
+  </tr>`).join('');
+  function findOverride(id) { return state.quotaOverrides.find(x => x.id === id); }
+  function bumpAndSave(o) { o.ts = Date.now(); saveQuotaConfig(); renderManager(); }
+  body.querySelectorAll('input.qov-from').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.from = el.value; bumpAndSave(o);
+  });
+  body.querySelectorAll('input.qov-to').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.to = el.value; bumpAndSave(o);
+  });
+  body.querySelectorAll('input.qov-quota').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.quota = Math.max(0, Number(el.value) || 0); bumpAndSave(o);
+  });
+  body.querySelectorAll('input.qov-note').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.note = el.value; bumpAndSave(o);
+  });
+  body.querySelectorAll('button[data-qov-remove]').forEach(btn => btn.onclick = () => {
+    state.quotaOverrides = state.quotaOverrides.filter(x => x.id !== btn.dataset.qovRemove);
+    saveQuotaConfig();
+    renderManager();
+  });
+}
+
 function renderManager() {
-  $('quota').value = state.quota;
+  $('weekdayQuota').value = state.weekdayQuota;
+  $('weekendQuota').value = state.weekendQuota;
   $('minDays').value = state.minDays;
   $('maxDays').value = state.maxDays;
   $('yearlyPoints').value = state.yearlyPoints;
   $('gateDay').value = state.gateDay;
   const w = roundWindow();
+  const ovCount = state.quotaOverrides.length;
+  const quotaDesc = `平日 ${state.weekdayQuota} 人 / 假日 ${state.weekendQuota} 人${ovCount ? `（另有 ${ovCount} 筆例外）` : ''}`;
   $('windowHelp').innerHTML = w
-    ? `<b>本輪可預約範圍：${w.from} ～ ${w.to}</b>（含）。單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。`
-    : `規則：單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。<br/>請填入 Gate Day 以啟用「可預約範圍」檢查。`;
+    ? `<b>本輪可預約範圍：${w.from} ～ ${w.to}</b>（含）。單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${quotaDesc}、每人每年 ${state.yearlyPoints} 次核准。`
+    : `規則：單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${quotaDesc}、每人每年 ${state.yearlyPoints} 次核准。<br/>請填入 Gate Day 以啟用「可預約範圍」檢查。`;
   renderBatch();
   renderCommittedRecords();
+  renderQuotaOverrides();
   renderSyncPanel();
 }
 
@@ -1130,13 +1223,18 @@ async function pushToSheet(quiet = false) {
   const url = getSheetUrl();
   if (!url) { if (!quiet) toast('請先設定 Web App URL'); return; }
   const records = buildSheetRecords();
+  const quotaConfig = {
+    weekday: state.weekdayQuota,
+    weekend: state.weekendQuota,
+    overrides: state.quotaOverrides,
+  };
   const statusEl = document.getElementById('syncStatus');
   if (statusEl) statusEl.textContent = '上傳中…';
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'overwrite', records }),
+      body: JSON.stringify({ action: 'overwrite', records, quotaConfig }),
       redirect: 'follow',
     });
     const data = await res.json();
@@ -1201,6 +1299,27 @@ async function pullFromSheet(quiet = false) {
     }
     saveBakedPatches(newPatches);
     saveStored(newStored);
+    if (data.quotaConfig && typeof data.quotaConfig === 'object') {
+      const qc = data.quotaConfig;
+      if (Number.isFinite(Number(qc.weekday))) state.weekdayQuota = Math.max(0, Number(qc.weekday));
+      if (Number.isFinite(Number(qc.weekend))) state.weekendQuota = Math.max(0, Number(qc.weekend));
+      if (Array.isArray(qc.overrides)) {
+        state.quotaOverrides = qc.overrides.map(o => ({
+          id: o.id || uid(),
+          from: String(o.from || ''),
+          to: String(o.to || ''),
+          quota: Math.max(0, Number(o.quota) || 0),
+          note: String(o.note || ''),
+          ts: Number(o.ts) || 0,
+        })).filter(o => o.from && o.to);
+      }
+      // Persist locally without re-marking dirty (clearDirty below will reset state).
+      localStorage.setItem(QUOTA_CONFIG_KEY, JSON.stringify({
+        weekday: state.weekdayQuota,
+        weekend: state.weekendQuota,
+        overrides: state.quotaOverrides,
+      }));
+    }
     setLastSync(new Date().toISOString());
     clearDirty();
     renderView();
@@ -1397,7 +1516,6 @@ function showTab(name) {
 }
 
 // =============== CALENDAR TAB ===============
-const CAL_FULL_THRESHOLD = 2;
 const calState = { year: 0, month: 0, selected: '' };
 
 function calOccupancy() {
@@ -1414,10 +1532,10 @@ function calOccupancy() {
   return map;
 }
 
-function calLevel(count) {
+function calLevel(count, cap) {
   if (count <= 0) return 0;
-  if (count < CAL_FULL_THRESHOLD) return 1;
-  return 2;
+  if (count >= cap) return 2;
+  return 1;
 }
 
 function renderCalendar() {
@@ -1436,9 +1554,10 @@ function renderCalendar() {
     const iso = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const list = occ.get(iso) || [];
     const cnt = list.length;
-    const lvl = calLevel(cnt);
+    const cap = quotaForDate(iso);
+    const lvl = calLevel(cnt, cap);
     const sel = iso === calState.selected ? ' selected' : '';
-    const label = cnt === 0 ? '空' : `${cnt} 人`;
+    const label = cnt === 0 ? '空' : `${cnt}/${cap}`;
     html += `<div class="cal-cell lvl${lvl}${sel}" data-d="${iso}"><div class="num">${d}</div><div class="cnt">${label}</div></div>`;
   }
   const total = startDow + daysInMonth;
@@ -1521,7 +1640,28 @@ function bindView() {
 }
 
 function bindManager() {
-  $('quota').onchange = (e) => { state.quota = Math.max(1, Number(e.target.value) || 1); renderManager(); };
+  $('weekdayQuota').onchange = (e) => {
+    state.weekdayQuota = Math.max(0, Number(e.target.value) || 0);
+    saveQuotaConfig();
+    renderManager();
+  };
+  $('weekendQuota').onchange = (e) => {
+    state.weekendQuota = Math.max(0, Number(e.target.value) || 0);
+    saveQuotaConfig();
+    renderManager();
+  };
+  $('addQuotaOverride').onclick = () => {
+    state.quotaOverrides.push({
+      id: uid(),
+      from: '',
+      to: '',
+      quota: state.weekdayQuota,
+      note: '',
+      ts: Date.now(),
+    });
+    saveQuotaConfig();
+    renderManager();
+  };
   $('minDays').onchange = (e) => { state.minDays = Math.max(1, Number(e.target.value) || 1); renderManager(); };
   $('maxDays').onchange = (e) => { state.maxDays = Math.max(1, Number(e.target.value) || 1); renderManager(); };
   $('yearlyPoints').onchange = (e) => { state.yearlyPoints = Math.max(1, Number(e.target.value) || 1); renderManager(); };
@@ -1577,7 +1717,7 @@ function showRange() {
 }
 
 // =============== MANAGER UNLOCK (PBKDF2 + AES-GCM) ===============
-const ENC = {"salt": "UwcbJDkUlB/27mPNPxib1A==", "iv": "BJty5ExkV6GrNw3C", "ct": "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", "iters": 200000};  // {salt, iv, ct, iters} all base64 (except iters)
+const ENC = {"salt": "B/OqJlRdrHiEYafZXlC18g==", "iv": "m8Q/RjPndAMgLIyT", "ct": "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", "iters": 200000};  // {salt, iv, ct, iters} all base64 (except iters)
 let MANAGER_UNLOCKED = false;
 
 function b64ToBytes(s) {
@@ -1625,6 +1765,12 @@ document.getElementById('unlockForm').addEventListener('submit', async (e) => {
 });
 
 state.batch = loadBatch();
+const _quotaCfg = loadQuotaConfig();
+if (_quotaCfg) {
+  state.weekdayQuota = _quotaCfg.weekday;
+  state.weekendQuota = _quotaCfg.weekend;
+  state.quotaOverrides = _quotaCfg.overrides;
+}
 bindView();
 bindCalendar();
 bindEditModal();
