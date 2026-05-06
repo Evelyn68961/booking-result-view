@@ -884,7 +884,7 @@ function renderBatch() {
   $('batchCount').textContent = state.batch.length;
   const body = $('batchBody');
   if (!state.batch.length) {
-    body.innerHTML = `<tr><td colspan="8" class="empty">尚未上傳任何申請</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="empty">尚未上傳任何申請</td></tr>`;
     return;
   }
   body.innerHTML = state.batch.map(e => {
@@ -905,8 +905,15 @@ function renderBatch() {
         ${catOptions.map(o => `<option value="${escapeHtml(o)}" ${e.daysCat===o?'selected':''}>${escapeHtml(o==='>10天'?'10天以上':o)}</option>`).join('')}
         ${hasStdCat ? '' : `<option value="${escapeHtml(e.daysCat)}" selected>${escapeHtml(e.daysCat)}</option>`}
       </select>`;
+    const subDisplay = e._submittedKey
+      ? e._submittedKey.slice(0, 16).replace('T', ' ')
+      : (e.submittedAt || '—');
+    const subTitle = e.submittedAt && e._submittedKey && e.submittedAt !== subDisplay
+      ? ` title="原始：${escapeHtml(e.submittedAt)}"`
+      : '';
     return `<tr>
       <td><input class="edit-cell edit-name" type="text" data-id="${e.id}" value="${escapeHtml(e.name)}" placeholder="姓名" /></td>
+      <td class="date"${subTitle}>${escapeHtml(subDisplay)}</td>
       <td><input class="edit-cell edit-date edit-start" type="date" data-id="${e.id}" value="${escapeHtml(e.start || '')}" /></td>
       <td><input class="edit-cell edit-date edit-end" type="date" data-id="${e.id}" value="${escapeHtml(e.end || '')}" /></td>
       <td class="num">${days}</td>
@@ -1770,6 +1777,7 @@ MANAGER_HTML_BLOCK = """\
     <table>
       <thead><tr>
         <th class="no-sort">姓名</th>
+        <th class="no-sort">送出時間</th>
         <th class="no-sort">起日</th>
         <th class="no-sort">迄日</th>
         <th class="no-sort">天數</th>
@@ -1778,7 +1786,7 @@ MANAGER_HTML_BLOCK = """\
         <th class="no-sort">最終決定</th>
         <th class="no-sort">操作</th>
       </tr></thead>
-      <tbody id="batchBody"><tr><td colspan="8" class="empty">尚未上傳任何申請</td></tr></tbody>
+      <tbody id="batchBody"><tr><td colspan="9" class="empty">尚未上傳任何申請</td></tr></tbody>
     </table>
   </div>
   <div class="actions-row">
