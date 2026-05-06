@@ -389,8 +389,14 @@ function loadStored() {
 }
 function saveStored(arr) { localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); markDirty(); }
 function loadBatch() {
-  try { return JSON.parse(localStorage.getItem(BATCH_KEY) || '[]'); }
-  catch { return []; }
+  try {
+    const arr = JSON.parse(localStorage.getItem(BATCH_KEY) || '[]');
+    // Backfill _submittedKey for batches saved before priority-by-time was added.
+    for (const e of arr) {
+      if (e && e._submittedKey === undefined) e._submittedKey = toSubmittedKey(e.submittedAt);
+    }
+    return arr;
+  } catch { return []; }
 }
 function saveBatch() { localStorage.setItem(BATCH_KEY, JSON.stringify(state.batch)); }
 function loadBakedPatches() {
@@ -499,6 +505,40 @@ function toIso(v) {
   return null;
 }
 
+// Normalise 送出時間 to a sortable ISO timestamp. Empty input returns ''
+// (callers treat empty as lowest priority). Tolerates Excel serials, Date,
+// `YYYY/M/D HH:mm[:ss]`, `YYYY-MM-DD HH:mm[:ss]`, `2026年5月2日 上午10:30`.
+function toSubmittedKey(v) {
+  if (v == null || v === '') return '';
+  if (v instanceof Date) return isNaN(v) ? '' : v.toISOString();
+  if (typeof v === 'number') {
+    const ms = EPOCH + v * 86400000;
+    return new Date(ms).toISOString();
+  }
+  let s = String(v).trim();
+  if (!s) return '';
+  s = s.replace(/(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日/, (_, y, m, d) => `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`);
+  let bumpHours = 0;
+  if (/下午|PM/i.test(s)) bumpHours = 12;
+  s = s.replace(/上午|下午|AM|PM/gi, '').trim();
+  s = s.replace(/\//g, '-');
+  // Hour-bump applies only to 12-hour clock readings; 13-23 is already PM.
+  const hm = s.match(/(\d{4}-\d{1,2}-\d{1,2})[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+  if (hm) {
+    let h = Number(hm[2]);
+    if (bumpHours && h < 12) h += 12;
+    if (!bumpHours && h === 12 && /上午|AM/i.test(String(v))) h = 0;
+    const [y, mo, d] = hm[1].split('-');
+    const iso = `${y}-${mo.padStart(2,'0')}-${d.padStart(2,'0')}T${String(h).padStart(2,'0')}:${hm[3].padStart(2,'0')}:${(hm[4]||'00').padStart(2,'0')}`;
+    const dt = new Date(iso);
+    if (!isNaN(dt)) return new Date(dt.getTime() - dt.getTimezoneOffset()*60000).toISOString();
+  }
+  if (/^\d+(\.\d+)?$/.test(s)) return toSubmittedKey(Number(s));
+  const d = new Date(s);
+  if (!isNaN(d)) return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString();
+  return '';
+}
+
 // =============== APPROVED-DAY MAP ===============
 // Build a map { isoDate -> approvedCount } from baked + stored + already-approved batch entries.
 function buildDayMap(includeBatchApproved = true) {
@@ -569,8 +609,9 @@ function predict(entry, dayMap, personYearUsed) {
   return { cls: 'pass', reason: '', conflicts: [] };
 }
 
-// Re-run prediction for every batch entry. Earlier "pass" entries occupy quota slots and
-// consume yearly points before later entries are tested.
+// Re-run prediction for every batch entry. Priority follows 送出時間 ascending
+// (earlier submission wins contention); rows missing 送出時間 are evaluated last,
+// in their array-order positions. Sheet display order in state.batch is preserved.
 function recomputeBatch() {
   const baseMap = buildDayMap(false); // history only
   const personYearUsed = new Map();
@@ -580,7 +621,16 @@ function recomputeBatch() {
     const key = `${e.name}|${year}`;
     if (!personYearUsed.has(key)) personYearUsed.set(key, personPointsUsed(e.name, year));
   }
-  for (const e of state.batch) {
+  const ordered = state.batch
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => {
+      const ka = a.e._submittedKey || '￿';
+      const kb = b.e._submittedKey || '￿';
+      if (ka < kb) return -1;
+      if (ka > kb) return 1;
+      return a.i - b.i;
+    });
+  for (const { e } of ordered) {
     e.predicted = predict(e, baseMap, personYearUsed);
     const eff = e.decision === 'auto' ? e.predicted.cls : e.decision;
     if (eff === 'pass' && e.start && e.end && e.end >= e.start) {
@@ -792,16 +842,20 @@ function parseUploadedRows(rows) {
     toast(`找不到必要欄位（姓名/起日/迄日）。表頭：${headerRow.join(', ')}`);
     return [];
   }
-  return dataRows.map(r => ({
-    id: uid(),
-    name: String(r[kName] ?? '').trim(),
-    start: toIso(r[kStart]),
-    end:   toIso(r[kEnd]),
-    daysCat: kCat ? String(r[kCat] ?? '').trim() : '',
-    submittedAt: kSub ? String(r[kSub] ?? '') : '',
-    decision: 'auto', // auto means follow prediction
-    predicted: { cls: 'other', reason: '', conflicts: [] },
-  })).filter(e => e.name || e.start || e.end);
+  return dataRows.map(r => {
+    const submittedAt = kSub ? String(r[kSub] ?? '') : '';
+    return {
+      id: uid(),
+      name: String(r[kName] ?? '').trim(),
+      start: toIso(r[kStart]),
+      end:   toIso(r[kEnd]),
+      daysCat: kCat ? String(r[kCat] ?? '').trim() : '',
+      submittedAt,
+      _submittedKey: toSubmittedKey(submittedAt),
+      decision: 'auto', // auto means follow prediction
+      predicted: { cls: 'other', reason: '', conflicts: [] },
+    };
+  }).filter(e => e.name || e.start || e.end);
 }
 
 function handleFile(file) {
@@ -1561,7 +1615,8 @@ function bindManager() {
     const end = $('mEnd').value;
     const daysCat = $('mDays').value;
     if (!name || !start || !end) { toast('請填寫姓名、起日、迄日'); return; }
-    state.batch.push({ id: uid(), name, start, end, daysCat, submittedAt: '', decision: 'auto', predicted: { cls:'other', reason:'', conflicts:[] } });
+    const submittedAt = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    state.batch.push({ id: uid(), name, start, end, daysCat, submittedAt, _submittedKey: toSubmittedKey(submittedAt), decision: 'auto', predicted: { cls:'other', reason:'', conflicts:[] } });
     saveBatch();
     $('mName').value = ''; $('mStart').value = ''; $('mEnd').value = '';
     renderBatch();

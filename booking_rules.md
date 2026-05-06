@@ -25,4 +25,4 @@ Yearly points are counted per *approved submission*, not per day. A 4-day approv
 
 ### Priority
 
-Within a single contention window, priority follows submission order (`送出時間` / server timestamp). The manager tab does not re-order — it evaluates申請 in the order they appear in the uploaded sheet, so the existing approved set + the申請 above the current row act as the baseline for capacity checks.
+Within a single contention window, priority follows submission order (`送出時間` / server timestamp): the earliest submission wins. The manager tab sorts a working copy of the batch by `送出時間` ascending before evaluation, so the existing approved set + every申請 with an earlier timestamp act as the baseline for capacity checks. Display order in the UI is unchanged — the sort only affects evaluation order. Rows missing a `送出時間` value (e.g. manually-added rows whose timestamp isn't filled in) sort last and are evaluated after every timestamped申請; ties on `送出時間` fall back to the sheet's row order.
