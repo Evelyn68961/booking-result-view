@@ -317,7 +317,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       </form>
       <label class="help" style="display:flex; align-items:center; gap:6px; margin-top:10px; justify-content:center; cursor:pointer;">
         <input id="rememberPw" type="checkbox" />
-        <span>在此電腦記住密碼（最多 6 台裝置，需先設定 Google Sheet 同步）</span>
+        <span>在此電腦記住密碼</span>
       </label>
       <div class="err" id="unlockErr"></div>
     </div>
