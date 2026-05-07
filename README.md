@@ -29,9 +29,9 @@ Day-by-day occupancy for the touched dates is shown so it's obvious which days a
 | [booking_rules.md](booking_rules.md) | The approval rules the manager tab enforces. |
 | [apps-script.gs](apps-script.gs) | Google Apps Script backend for the optional Sheet sync. Paste into the script editor of your shared sheet. |
 | [spec.md](spec.md) | Architecture / data model / sync semantics — read this when changing internals. |
-| [make_tests.py](make_tests.py) | Generates `batch-YYYY-MM.xlsx` files — one per month — that simulate the申請 batches the manager would receive. |
+| [make_tests.py](make_tests.py) | Generates the `batch-2026-12.xlsx` test batch — a single申請 batch covering every rule that fits inside the clean December window of the baked history. |
 | `202401-202604預假紀錄.xlsx` | Source data baked into the page. |
-| `batch-*.xlsx` | Monthly申請 batches for trying the manager tab. Process in filename order, committing 通過 rows between batches so history accumulates. |
+| `batch-2026-12.xlsx` | One申請 batch for trying the manager tab. Single upload — all 17 rows live in 12/06-2027/01/04, the only window not already busy in the baked history. |
 
 ## Build
 
@@ -67,28 +67,31 @@ The 「移除所有已儲存的新增紀錄」button clears `booking-extra-recor
 
 ## Test scenarios
 
-Run `python make_tests.py` to regenerate the monthly batch files
-(`batch-2026-04.xlsx` … `batch-2026-12.xlsx`). Recommended manager-tab settings:
+Run `python make_tests.py` to regenerate `batch-2026-12.xlsx`. Recommended manager-tab settings (do **not** tweak):
 
 - Gate Day = `2026-05-02` → bookable window 2026-05-02 ~ 2027-01-03
 - 平日上限 = 2 / 假日上限 = 4 / 單筆 4–10 天 / 年度 12 點 (上限例外 empty)
 
-Process the batches in filename order. After each batch, commit 通過 rows
-before uploading the next month — this lets historical state accumulate the
-way it would in real use, so cross-month rules (yearly point cap, day-quota
-across earlier approvals) are exercised end-to-end.
+Why one batch: the baked file `202401-202604預假紀錄.xlsx` already contains
+通過 records for almost every weekday in May–November 2026 plus 12/01-12/05.
+The only stretch with room for new bookings is **2026-12-06 onwards**, so
+the test batch packs every rule that can be exercised into that window.
 
-What each batch exercises:
+Upload `batch-2026-12.xlsx` once. The 17 rows cover:
 
-| Batch | Coverage |
+| Rows | Rule |
 |---|---|
-| `batch-2026-04.xlsx` | Gate-day boundary (start before Gate Day fails) |
-| `batch-2026-05.xlsx` | Day-count edges (4 days OK, 11 too long, 3 too short, reversed dates) |
-| `batch-2026-06.xlsx` | Per-day quota (3rd person on same dates fails, partial overlap fails) |
-| `batch-2026-07.xlsx` … `batch-2026-09.xlsx` | 測試年's 12-points marathon (1/12 → 12/12 → 13/12 fails year cap) |
-| `batch-2026-10.xlsx` | **December rush** — quota contention on prime weeks, Christmas overlap, and the 2027-01-03 window-end boundary (G7 ends exactly on the boundary, G8 one day past) |
-| `batch-2026-11.xlsx` | **Priority by 送出時間** — three rows on a clean Tue-Fri December week (12/1-12/4) in *reverse* submission-time order; sort must run for the verdicts to come out right (H3 / H2 pass, H1 fails) |
-| `batch-2026-12.xlsx` | **Weekend cap = 4** — four bookings all Sat-Tue 2026-12-12 through 12-15. I1 / I2 pass; I3 / I4 fail at Mon-Tue (cap=2). The 已滿日 line on the rejected rows lists only Mon and Tue — Sat / Sun are NOT listed because 假日上限=4 leaves them under cap (3/4). Under the old single quota=2, those rows would have failed at Sat first. The 測試說明 sheet documents an optional 上限例外 walkthrough (12/12 → 1) that flips the binding date back to Saturday. |
+| A1 | Gate-day boundary — start before 2026-05-02 fails (`超出可預約範圍`) |
+| B1-B4 | Day-count edges — 4 days OK, 11 too long, 3 too short, 迄日 < 起日 |
+| C1-C3 | Weekday quota — 3 people on 12/14-12/17, 3rd fails (`已超過上限人數`) |
+| P1-P3 | **Priority by 送出時間** — three people on 12/22-12/25; rows ship in *reverse* submit-time order (P1 latest, P3 earliest), so the verdicts (P1 fail / P2-P3 pass) only come out right when `recomputeBatch()` sorts by 送出時間 first |
+| W1-W4 | **Weekend cap = 4** — four people on 12/26-12/29 (Sat-Tue); W3/W4 fail because Mon-Tue still cap=2, but their 已滿日 line lists only Mon/Tue, not Sat/Sun, demonstrating 假日上限=4. The 測試說明 sheet has an optional 上限例外 walkthrough that tightens 12/26 to 1 and flips the conflict day back to Saturday |
+| E1-E2 | Window-end boundary — E1 ends exactly on 2027-01-03 and passes; E2 ends 2027-01-04 and fails |
+
+The yearly-points rule (每人每年 12 點) is enforced by the code but isn't
+covered by an xlsx scenario — packing 12 non-overlapping 4-day bookings for
+one person doesn't fit into the clean December window. Verify it manually if
+needed; the rule is documented in [booking_rules.md](booking_rules.md).
 
 Each xlsx has the upload payload on the first sheet (`新申請`) and the
 expected verdict for every row documented on the second sheet (`測試說明`).
