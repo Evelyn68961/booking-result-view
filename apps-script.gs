@@ -28,6 +28,12 @@
  *   range override. The whole sheet is rewritten on every push, so direct
  *   edits get overwritten by the next sync — change the limits in the app's
  *   "上限例外" panel.
+ * - The "PasswordSlots" sheet tracks the up-to-6 devices that have saved the
+ *   manager password locally. The app uses claimPasswordSlot /
+ *   releasePasswordSlot actions to add/remove rows. To free slots manually,
+ *   delete rows from this sheet — the device whose row was deleted will be
+ *   asked for the password again on its next visit (its localStorage copy is
+ *   re-validated against this sheet on every pull).
  * - Browsers block fetch() from file:// to https URLs, so index.html must
  *   be served over http(s) — GitHub Pages / Netlify / `python -m http.server`
  *   all work.
@@ -37,6 +43,9 @@ const SHEET_NAME = 'Bookings';
 const HEADERS = ['id', 'name', 'status', 'start', 'end', 'daysCat', 'submittedAt', 'source', 'deleted'];
 const QUOTA_SHEET_NAME = 'QuotaConfig';
 const QUOTA_HEADERS = ['kind', 'from', 'to', 'quota', 'note', 'ts'];
+const SLOTS_SHEET_NAME = 'PasswordSlots';
+const SLOTS_HEADERS = ['deviceId', 'label', 'savedAt'];
+const PASSWORD_SLOT_LIMIT = 6;
 
 function doGet(e) {
   const sheet = getSheet();
@@ -56,12 +65,49 @@ function doGet(e) {
       records.push(o);
     }
   }
-  return jsonOut({ ok: true, records: records, quotaConfig: readQuotaConfig() });
+  return jsonOut({ ok: true, records: records, quotaConfig: readQuotaConfig(), passwordSlots: readPasswordSlots() });
 }
 
 function doPost(e) {
   let body = {};
   try { body = JSON.parse(e.postData.contents); } catch (err) {}
+  if (body.action === 'claimPasswordSlot') {
+    const deviceId = String(body.deviceId || '').trim();
+    if (!deviceId) return jsonOut({ ok: false, error: 'missing deviceId' });
+    const lock = LockService.getScriptLock();
+    try { lock.waitLock(5000); } catch (err) { return jsonOut({ ok: false, error: 'busy, try again' }); }
+    try {
+      const slots = readPasswordSlots();
+      const existing = slots.find(s => s.deviceId === deviceId);
+      if (existing) {
+        existing.label = String(body.label || existing.label || '');
+        existing.savedAt = new Date().toISOString();
+        writePasswordSlots(slots);
+        return jsonOut({ ok: true, slots: slots, alreadyClaimed: true });
+      }
+      if (slots.length >= PASSWORD_SLOT_LIMIT) {
+        return jsonOut({ ok: false, error: '已達上限 ' + PASSWORD_SLOT_LIMIT + ' 台', slots: slots });
+      }
+      slots.push({ deviceId, label: String(body.label || ''), savedAt: new Date().toISOString() });
+      writePasswordSlots(slots);
+      return jsonOut({ ok: true, slots: slots });
+    } finally {
+      lock.releaseLock();
+    }
+  }
+  if (body.action === 'releasePasswordSlot') {
+    const deviceId = String(body.deviceId || '').trim();
+    if (!deviceId) return jsonOut({ ok: false, error: 'missing deviceId' });
+    const lock = LockService.getScriptLock();
+    try { lock.waitLock(5000); } catch (err) { return jsonOut({ ok: false, error: 'busy, try again' }); }
+    try {
+      const slots = readPasswordSlots().filter(s => s.deviceId !== deviceId);
+      writePasswordSlots(slots);
+      return jsonOut({ ok: true, slots: slots });
+    } finally {
+      lock.releaseLock();
+    }
+  }
   if (body.action === 'overwrite') {
     const sheet = getSheet();
     sheet.clear();
@@ -136,6 +182,52 @@ function readQuotaConfig() {
     }
   }
   return out;
+}
+
+function getSlotsSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SLOTS_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SLOTS_SHEET_NAME);
+    sheet.getRange(1, 1, 1, SLOTS_HEADERS.length).setValues([SLOTS_HEADERS]);
+    sheet.getRange(1, 1, 1, SLOTS_HEADERS.length).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function readPasswordSlots() {
+  const sheet = getSlotsSheet();
+  const values = sheet.getDataRange().getValues();
+  const out = [];
+  if (values.length < 2) return out;
+  const hdr = values[0].map(String);
+  const col = name => hdr.indexOf(name);
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (row.every(v => v === '' || v === null)) continue;
+    const fmt = v => v instanceof Date ? Utilities.formatDate(v, 'UTC', "yyyy-MM-dd'T'HH:mm:ss'Z'") : String(v || '');
+    const deviceId = fmt(row[col('deviceId')]);
+    if (!deviceId) continue;
+    out.push({
+      deviceId,
+      label: fmt(row[col('label')]),
+      savedAt: fmt(row[col('savedAt')]),
+    });
+  }
+  return out;
+}
+
+function writePasswordSlots(slots) {
+  const sheet = getSlotsSheet();
+  sheet.clear();
+  sheet.getRange(1, 1, 1, SLOTS_HEADERS.length).setValues([SLOTS_HEADERS]);
+  sheet.getRange(1, 1, 1, SLOTS_HEADERS.length).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  if (!slots.length) return;
+  const rows = slots.map(s => [String(s.deviceId || ''), String(s.label || ''), String(s.savedAt || '')]);
+  sheet.getRange(2, 1, rows.length, SLOTS_HEADERS.length).setValues(rows);
+  sheet.getRange(2, 1, rows.length, SLOTS_HEADERS.length).setNumberFormat('@');
 }
 
 function writeQuotaConfig(qc) {
