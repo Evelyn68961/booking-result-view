@@ -282,6 +282,7 @@ const BATCH_KEY = 'booking-batch-v1';
 const BAKED_PATCHES_KEY = 'booking-baked-patches-v1';
 const SHEET_URL_KEY = 'booking-sheet-url-v1';
 const SHEET_LAST_SYNC_KEY = 'booking-sheet-last-sync-v1';
+const QUOTA_CONFIG_KEY = 'booking-quota-config-v1';
 
 // =============== STATE ===============
 const state = {
@@ -289,7 +290,8 @@ const state = {
   from: '', to: '',
   sortKey: '_start_iso', sortDir: 'desc',
   page: 1, pageSize: 50,
-  quota: 2, minDays: 4, maxDays: 10, yearlyPoints: 12,
+  weekdayQuota: 2, weekendQuota: 4, quotaOverrides: [],
+  minDays: 4, maxDays: 10, yearlyPoints: 12,
   gateDay: '',
   batch: [],
   dirty: false,
@@ -309,10 +311,43 @@ function loadStored() {
 }
 function saveStored(arr) { localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); markDirty(); }
 function loadBatch() {
-  try { return JSON.parse(localStorage.getItem(BATCH_KEY) || '[]'); }
-  catch { return []; }
+  try {
+    const arr = JSON.parse(localStorage.getItem(BATCH_KEY) || '[]');
+    // Backfill _submittedKey for batches saved before priority-by-time was added.
+    for (const e of arr) {
+      if (e && e._submittedKey === undefined) e._submittedKey = toSubmittedKey(e.submittedAt);
+    }
+    return arr;
+  } catch { return []; }
 }
 function saveBatch() { localStorage.setItem(BATCH_KEY, JSON.stringify(state.batch)); }
+function loadQuotaConfig() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(QUOTA_CONFIG_KEY) || 'null');
+    if (!raw) return null;
+    return {
+      weekday: Math.max(0, Number(raw.weekday) || 0),
+      weekend: Math.max(0, Number(raw.weekend) || 0),
+      overrides: Array.isArray(raw.overrides) ? raw.overrides.map(o => ({
+        id: o.id || uid(),
+        from: String(o.from || ''),
+        to: String(o.to || ''),
+        quota: Math.max(0, Number(o.quota) || 0),
+        note: String(o.note || ''),
+        ts: Number(o.ts) || 0,
+      })).filter(o => o.from && o.to) : [],
+    };
+  } catch { return null; }
+}
+function saveQuotaConfig() {
+  const payload = {
+    weekday: state.weekdayQuota,
+    weekend: state.weekendQuota,
+    overrides: state.quotaOverrides,
+  };
+  localStorage.setItem(QUOTA_CONFIG_KEY, JSON.stringify(payload));
+  markDirty();
+}
 function loadBakedPatches() {
   try { return JSON.parse(localStorage.getItem(BAKED_PATCHES_KEY) || '{}'); }
   catch { return {}; }
@@ -371,6 +406,26 @@ function* iterDates(a, b) {
     yield d.toISOString().slice(0, 10);
   }
 }
+// Per-date daily cap. Overrides win over weekday/weekend defaults; among
+// overrides, the narrower range wins (carve-outs beat baselines), with the
+// most-recently-added override breaking ties.
+function quotaForDate(iso) {
+  let best = null;
+  let bestSpan = Infinity;
+  let bestTs = -Infinity;
+  for (const o of state.quotaOverrides) {
+    if (!o.from || !o.to) continue;
+    if (iso < o.from || iso > o.to) continue;
+    const span = daysInRange(o.from, o.to);
+    const ts = o.ts || 0;
+    if (span < bestSpan || (span === bestSpan && ts >= bestTs)) {
+      best = o; bestSpan = span; bestTs = ts;
+    }
+  }
+  if (best) return Math.max(0, Number(best.quota) || 0);
+  return isWeekend(iso) ? state.weekendQuota : state.weekdayQuota;
+}
+
 function isWeekend(iso) {
   const dow = new Date(iso + 'T00:00:00').getDay();
   return dow === 0 || dow === 6;
@@ -417,6 +472,40 @@ function toIso(v) {
   const d = new Date(s);
   if (!isNaN(d)) return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0, 10);
   return null;
+}
+
+// Normalise 送出時間 to a sortable ISO timestamp. Empty input returns ''
+// (callers treat empty as lowest priority). Tolerates Excel serials, Date,
+// `YYYY/M/D HH:mm[:ss]`, `YYYY-MM-DD HH:mm[:ss]`, `2026年5月2日 上午10:30`.
+function toSubmittedKey(v) {
+  if (v == null || v === '') return '';
+  if (v instanceof Date) return isNaN(v) ? '' : v.toISOString();
+  if (typeof v === 'number') {
+    const ms = EPOCH + v * 86400000;
+    return new Date(ms).toISOString();
+  }
+  let s = String(v).trim();
+  if (!s) return '';
+  s = s.replace(/(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日/, (_, y, m, d) => `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`);
+  let bumpHours = 0;
+  if (/下午|PM/i.test(s)) bumpHours = 12;
+  s = s.replace(/上午|下午|AM|PM/gi, '').trim();
+  s = s.replace(/\//g, '-');
+  // Hour-bump applies only to 12-hour clock readings; 13-23 is already PM.
+  const hm = s.match(/(\d{4}-\d{1,2}-\d{1,2})[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+  if (hm) {
+    let h = Number(hm[2]);
+    if (bumpHours && h < 12) h += 12;
+    if (!bumpHours && h === 12 && /上午|AM/i.test(String(v))) h = 0;
+    const [y, mo, d] = hm[1].split('-');
+    const iso = `${y}-${mo.padStart(2,'0')}-${d.padStart(2,'0')}T${String(h).padStart(2,'0')}:${hm[3].padStart(2,'0')}:${(hm[4]||'00').padStart(2,'0')}`;
+    const dt = new Date(iso);
+    if (!isNaN(dt)) return new Date(dt.getTime() - dt.getTimezoneOffset()*60000).toISOString();
+  }
+  if (/^\d+(\.\d+)?$/.test(s)) return toSubmittedKey(Number(s));
+  const d = new Date(s);
+  if (!isNaN(d)) return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString();
+  return '';
 }
 
 // =============== APPROVED-DAY MAP ===============
@@ -481,7 +570,8 @@ function predict(entry, dayMap, personYearUsed) {
   const conflicts = [];
   for (const d of iterDates(entry.start, entry.end)) {
     const cur = dayMap.get(d) || 0;
-    if (cur >= state.quota) conflicts.push({ d, cur });
+    const cap = quotaForDate(d);
+    if (cur >= cap) conflicts.push({ d, cur, cap });
   }
   if (conflicts.length) {
     return { cls: 'fail', reason: '已超過上限人數', conflicts };
@@ -489,8 +579,9 @@ function predict(entry, dayMap, personYearUsed) {
   return { cls: 'pass', reason: '', conflicts: [] };
 }
 
-// Re-run prediction for every batch entry. Earlier "pass" entries occupy quota slots and
-// consume yearly points before later entries are tested.
+// Re-run prediction for every batch entry. Priority follows 送出時間 ascending
+// (earlier submission wins contention); rows missing 送出時間 are evaluated last,
+// in their array-order positions. Sheet display order in state.batch is preserved.
 function recomputeBatch() {
   const baseMap = buildDayMap(false); // history only
   const personYearUsed = new Map();
@@ -500,7 +591,16 @@ function recomputeBatch() {
     const key = `${e.name}|${year}`;
     if (!personYearUsed.has(key)) personYearUsed.set(key, personPointsUsed(e.name, year));
   }
-  for (const e of state.batch) {
+  const ordered = state.batch
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => {
+      const ka = a.e._submittedKey || '￿';
+      const kb = b.e._submittedKey || '￿';
+      if (ka < kb) return -1;
+      if (ka > kb) return 1;
+      return a.i - b.i;
+    });
+  for (const { e } of ordered) {
     e.predicted = predict(e, baseMap, personYearUsed);
     const eff = e.decision === 'auto' ? e.predicted.cls : e.decision;
     if (eff === 'pass' && e.start && e.end && e.end >= e.start) {
@@ -712,16 +812,20 @@ function parseUploadedRows(rows) {
     toast(`找不到必要欄位（姓名/起日/迄日）。表頭：${headerRow.join(', ')}`);
     return [];
   }
-  return dataRows.map(r => ({
-    id: uid(),
-    name: String(r[kName] ?? '').trim(),
-    start: toIso(r[kStart]),
-    end:   toIso(r[kEnd]),
-    daysCat: kCat ? String(r[kCat] ?? '').trim() : '',
-    submittedAt: kSub ? String(r[kSub] ?? '') : '',
-    decision: 'auto', // auto means follow prediction
-    predicted: { cls: 'other', reason: '', conflicts: [] },
-  })).filter(e => e.name || e.start || e.end);
+  return dataRows.map(r => {
+    const submittedAt = kSub ? String(r[kSub] ?? '') : '';
+    return {
+      id: uid(),
+      name: String(r[kName] ?? '').trim(),
+      start: toIso(r[kStart]),
+      end:   toIso(r[kEnd]),
+      daysCat: kCat ? String(r[kCat] ?? '').trim() : '',
+      submittedAt,
+      _submittedKey: toSubmittedKey(submittedAt),
+      decision: 'auto', // auto means follow prediction
+      predicted: { cls: 'other', reason: '', conflicts: [] },
+    };
+  }).filter(e => e.name || e.start || e.end);
 }
 
 function handleFile(file) {
@@ -750,7 +854,7 @@ function renderBatch() {
   $('batchCount').textContent = state.batch.length;
   const body = $('batchBody');
   if (!state.batch.length) {
-    body.innerHTML = `<tr><td colspan="8" class="empty">尚未上傳任何申請</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="empty">尚未上傳任何申請</td></tr>`;
     return;
   }
   body.innerHTML = state.batch.map(e => {
@@ -759,7 +863,7 @@ function renderBatch() {
     const pillCls = eff === 'pass' ? 'pass' : eff === 'fail' ? 'fail' : 'other';
     const pillLabel = eff === 'pass' ? '通過' : eff === 'fail' ? '未通過' : '—';
     const conflictHtml = e.predicted.conflicts.length
-      ? `<div class="conflict-list">已滿日：${e.predicted.conflicts.map(c => `${c.d}(${c.cur})`).join(', ')}</div>`
+      ? `<div class="conflict-list">已滿日：${e.predicted.conflicts.map(c => `${c.d}(${c.cur}/${c.cap ?? '-'})`).join(', ')}</div>`
       : '';
     const predLabel = e.predicted.cls === 'pass' ? '通過'
       : e.predicted.cls === 'fail' ? `未通過 - ${e.predicted.reason}` : '—';
@@ -771,8 +875,15 @@ function renderBatch() {
         ${catOptions.map(o => `<option value="${escapeHtml(o)}" ${e.daysCat===o?'selected':''}>${escapeHtml(o==='>10天'?'10天以上':o)}</option>`).join('')}
         ${hasStdCat ? '' : `<option value="${escapeHtml(e.daysCat)}" selected>${escapeHtml(e.daysCat)}</option>`}
       </select>`;
+    const subDisplay = e._submittedKey
+      ? e._submittedKey.slice(0, 16).replace('T', ' ')
+      : (e.submittedAt || '—');
+    const subTitle = e.submittedAt && e._submittedKey && e.submittedAt !== subDisplay
+      ? ` title="原始：${escapeHtml(e.submittedAt)}"`
+      : '';
     return `<tr>
       <td><input class="edit-cell edit-name" type="text" data-id="${e.id}" value="${escapeHtml(e.name)}" placeholder="姓名" /></td>
+      <td class="date"${subTitle}>${escapeHtml(subDisplay)}</td>
       <td><input class="edit-cell edit-date edit-start" type="date" data-id="${e.id}" value="${escapeHtml(e.start || '')}" /></td>
       <td><input class="edit-cell edit-date edit-end" type="date" data-id="${e.id}" value="${escapeHtml(e.end || '')}" /></td>
       <td class="num">${days}</td>
@@ -836,9 +947,10 @@ function renderDayGrid() {
   const sorted = Array.from(dates).sort();
   $('dayGrid').innerHTML = sorted.map(d => {
     const n = map.get(d) || 0;
-    const cls = n >= state.quota ? 'full' : (n === state.quota - 1 ? 'tight' : '');
+    const cap = quotaForDate(d);
+    const cls = n >= cap ? 'full' : (n === cap - 1 ? 'tight' : '');
     const dow = ['日','一','二','三','四','五','六'][new Date(d+'T00:00:00').getDay()];
-    return `<div class="day-cell ${cls}"><div class="d">${d} (${dow})</div><div class="n">${n} / ${state.quota}</div></div>`;
+    return `<div class="day-cell ${cls}"><div class="d">${d} (${dow})</div><div class="n">${n} / ${cap}</div></div>`;
   }).join('');
 }
 
@@ -992,18 +1104,60 @@ function renderCommittedRecords() {
   });
 }
 
+function renderQuotaOverrides() {
+  const body = $('quotaOverrideBody');
+  if (!body) return;
+  if (!state.quotaOverrides.length) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">尚未設定任何例外</td></tr>`;
+    return;
+  }
+  const sorted = state.quotaOverrides
+    .map((o, i) => ({ o, i }))
+    .sort((a, b) => (a.o.from || '').localeCompare(b.o.from || '') || a.i - b.i);
+  body.innerHTML = sorted.map(({ o }) => `<tr>
+    <td><input class="edit-cell qov-from" type="date" data-id="${o.id}" value="${escapeHtml(o.from || '')}" /></td>
+    <td><input class="edit-cell qov-to" type="date" data-id="${o.id}" value="${escapeHtml(o.to || '')}" /></td>
+    <td><input class="edit-cell qov-quota" type="number" min="0" data-id="${o.id}" value="${o.quota}" /></td>
+    <td><input class="edit-cell qov-note" type="text" data-id="${o.id}" value="${escapeHtml(o.note || '')}" placeholder="（選填）" /></td>
+    <td><button class="ghost" data-qov-remove="${o.id}">移除</button></td>
+  </tr>`).join('');
+  function findOverride(id) { return state.quotaOverrides.find(x => x.id === id); }
+  function bumpAndSave(o) { o.ts = Date.now(); saveQuotaConfig(); renderManager(); }
+  body.querySelectorAll('input.qov-from').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.from = el.value; bumpAndSave(o);
+  });
+  body.querySelectorAll('input.qov-to').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.to = el.value; bumpAndSave(o);
+  });
+  body.querySelectorAll('input.qov-quota').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.quota = Math.max(0, Number(el.value) || 0); bumpAndSave(o);
+  });
+  body.querySelectorAll('input.qov-note').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.note = el.value; bumpAndSave(o);
+  });
+  body.querySelectorAll('button[data-qov-remove]').forEach(btn => btn.onclick = () => {
+    state.quotaOverrides = state.quotaOverrides.filter(x => x.id !== btn.dataset.qovRemove);
+    saveQuotaConfig();
+    renderManager();
+  });
+}
+
 function renderManager() {
-  $('quota').value = state.quota;
+  $('weekdayQuota').value = state.weekdayQuota;
+  $('weekendQuota').value = state.weekendQuota;
   $('minDays').value = state.minDays;
   $('maxDays').value = state.maxDays;
   $('yearlyPoints').value = state.yearlyPoints;
   $('gateDay').value = state.gateDay;
   const w = roundWindow();
+  const ovCount = state.quotaOverrides.length;
+  const quotaDesc = `平日 ${state.weekdayQuota} 人 / 假日 ${state.weekendQuota} 人${ovCount ? `（另有 ${ovCount} 筆例外）` : ''}`;
   $('windowHelp').innerHTML = w
-    ? `<b>本輪可預約範圍：${w.from} ～ ${w.to}</b>（含）。單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。`
-    : `規則：單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。<br/>請填入 Gate Day 以啟用「可預約範圍」檢查。`;
+    ? `<b>本輪可預約範圍：${w.from} ～ ${w.to}</b>（含）。單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${quotaDesc}、每人每年 ${state.yearlyPoints} 次核准。`
+    : `規則：單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${quotaDesc}、每人每年 ${state.yearlyPoints} 次核准。<br/>請填入 Gate Day 以啟用「可預約範圍」檢查。`;
   renderBatch();
   renderCommittedRecords();
+  renderQuotaOverrides();
   renderSyncPanel();
 }
 
@@ -1069,13 +1223,18 @@ async function pushToSheet(quiet = false) {
   const url = getSheetUrl();
   if (!url) { if (!quiet) toast('請先設定 Web App URL'); return; }
   const records = buildSheetRecords();
+  const quotaConfig = {
+    weekday: state.weekdayQuota,
+    weekend: state.weekendQuota,
+    overrides: state.quotaOverrides,
+  };
   const statusEl = document.getElementById('syncStatus');
   if (statusEl) statusEl.textContent = '上傳中…';
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'overwrite', records }),
+      body: JSON.stringify({ action: 'overwrite', records, quotaConfig }),
       redirect: 'follow',
     });
     const data = await res.json();
@@ -1140,6 +1299,27 @@ async function pullFromSheet(quiet = false) {
     }
     saveBakedPatches(newPatches);
     saveStored(newStored);
+    if (data.quotaConfig && typeof data.quotaConfig === 'object') {
+      const qc = data.quotaConfig;
+      if (Number.isFinite(Number(qc.weekday))) state.weekdayQuota = Math.max(0, Number(qc.weekday));
+      if (Number.isFinite(Number(qc.weekend))) state.weekendQuota = Math.max(0, Number(qc.weekend));
+      if (Array.isArray(qc.overrides)) {
+        state.quotaOverrides = qc.overrides.map(o => ({
+          id: o.id || uid(),
+          from: String(o.from || ''),
+          to: String(o.to || ''),
+          quota: Math.max(0, Number(o.quota) || 0),
+          note: String(o.note || ''),
+          ts: Number(o.ts) || 0,
+        })).filter(o => o.from && o.to);
+      }
+      // Persist locally without re-marking dirty (clearDirty below will reset state).
+      localStorage.setItem(QUOTA_CONFIG_KEY, JSON.stringify({
+        weekday: state.weekdayQuota,
+        weekend: state.weekendQuota,
+        overrides: state.quotaOverrides,
+      }));
+    }
     setLastSync(new Date().toISOString());
     clearDirty();
     renderView();
@@ -1336,7 +1516,6 @@ function showTab(name) {
 }
 
 // =============== CALENDAR TAB ===============
-const CAL_FULL_THRESHOLD = 2;
 const calState = { year: 0, month: 0, selected: '' };
 
 function calOccupancy() {
@@ -1353,10 +1532,10 @@ function calOccupancy() {
   return map;
 }
 
-function calLevel(count) {
+function calLevel(count, cap) {
   if (count <= 0) return 0;
-  if (count < CAL_FULL_THRESHOLD) return 1;
-  return 2;
+  if (count >= cap) return 2;
+  return 1;
 }
 
 function renderCalendar() {
@@ -1375,9 +1554,10 @@ function renderCalendar() {
     const iso = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const list = occ.get(iso) || [];
     const cnt = list.length;
-    const lvl = calLevel(cnt);
+    const cap = quotaForDate(iso);
+    const lvl = calLevel(cnt, cap);
     const sel = iso === calState.selected ? ' selected' : '';
-    const label = cnt === 0 ? '空' : `${cnt} 人`;
+    const label = cnt === 0 ? '空' : `${cnt}/${cap}`;
     html += `<div class="cal-cell lvl${lvl}${sel}" data-d="${iso}"><div class="num">${d}</div><div class="cnt">${label}</div></div>`;
   }
   const total = startDow + daysInMonth;
@@ -1460,7 +1640,28 @@ function bindView() {
 }
 
 function bindManager() {
-  $('quota').onchange = (e) => { state.quota = Math.max(1, Number(e.target.value) || 1); renderManager(); };
+  $('weekdayQuota').onchange = (e) => {
+    state.weekdayQuota = Math.max(0, Number(e.target.value) || 0);
+    saveQuotaConfig();
+    renderManager();
+  };
+  $('weekendQuota').onchange = (e) => {
+    state.weekendQuota = Math.max(0, Number(e.target.value) || 0);
+    saveQuotaConfig();
+    renderManager();
+  };
+  $('addQuotaOverride').onclick = () => {
+    state.quotaOverrides.push({
+      id: uid(),
+      from: '',
+      to: '',
+      quota: state.weekdayQuota,
+      note: '',
+      ts: Date.now(),
+    });
+    saveQuotaConfig();
+    renderManager();
+  };
   $('minDays').onchange = (e) => { state.minDays = Math.max(1, Number(e.target.value) || 1); renderManager(); };
   $('maxDays').onchange = (e) => { state.maxDays = Math.max(1, Number(e.target.value) || 1); renderManager(); };
   $('yearlyPoints').onchange = (e) => { state.yearlyPoints = Math.max(1, Number(e.target.value) || 1); renderManager(); };
@@ -1481,7 +1682,8 @@ function bindManager() {
     const end = $('mEnd').value;
     const daysCat = $('mDays').value;
     if (!name || !start || !end) { toast('請填寫姓名、起日、迄日'); return; }
-    state.batch.push({ id: uid(), name, start, end, daysCat, submittedAt: '', decision: 'auto', predicted: { cls:'other', reason:'', conflicts:[] } });
+    const submittedAt = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    state.batch.push({ id: uid(), name, start, end, daysCat, submittedAt, _submittedKey: toSubmittedKey(submittedAt), decision: 'auto', predicted: { cls:'other', reason:'', conflicts:[] } });
     saveBatch();
     $('mName').value = ''; $('mStart').value = ''; $('mEnd').value = '';
     renderBatch();
@@ -1515,7 +1717,7 @@ function showRange() {
 }
 
 // =============== MANAGER UNLOCK (PBKDF2 + AES-GCM) ===============
-const ENC = {"salt": "0kovoLfS+nDAJWY5J08MMA==", "iv": "MCxFTBxYSyO/iHig", "ct": "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", "iters": 200000};  // {salt, iv, ct, iters} all base64 (except iters)
+const ENC = {"salt": "B/OqJlRdrHiEYafZXlC18g==", "iv": "m8Q/RjPndAMgLIyT", "ct": "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", "iters": 200000};  // {salt, iv, ct, iters} all base64 (except iters)
 let MANAGER_UNLOCKED = false;
 
 function b64ToBytes(s) {
@@ -1563,6 +1765,12 @@ document.getElementById('unlockForm').addEventListener('submit', async (e) => {
 });
 
 state.batch = loadBatch();
+const _quotaCfg = loadQuotaConfig();
+if (_quotaCfg) {
+  state.weekdayQuota = _quotaCfg.weekday;
+  state.weekendQuota = _quotaCfg.weekend;
+  state.quotaOverrides = _quotaCfg.overrides;
+}
 bindView();
 bindCalendar();
 bindEditModal();

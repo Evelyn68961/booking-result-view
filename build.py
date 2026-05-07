@@ -362,6 +362,7 @@ const BATCH_KEY = 'booking-batch-v1';
 const BAKED_PATCHES_KEY = 'booking-baked-patches-v1';
 const SHEET_URL_KEY = 'booking-sheet-url-v1';
 const SHEET_LAST_SYNC_KEY = 'booking-sheet-last-sync-v1';
+const QUOTA_CONFIG_KEY = 'booking-quota-config-v1';
 
 // =============== STATE ===============
 const state = {
@@ -369,7 +370,8 @@ const state = {
   from: '', to: '',
   sortKey: '_start_iso', sortDir: 'desc',
   page: 1, pageSize: 50,
-  quota: 2, minDays: 4, maxDays: 10, yearlyPoints: 12,
+  weekdayQuota: 2, weekendQuota: 4, quotaOverrides: [],
+  minDays: 4, maxDays: 10, yearlyPoints: 12,
   gateDay: '',
   batch: [],
   dirty: false,
@@ -389,10 +391,43 @@ function loadStored() {
 }
 function saveStored(arr) { localStorage.setItem(STORAGE_KEY, JSON.stringify(arr)); markDirty(); }
 function loadBatch() {
-  try { return JSON.parse(localStorage.getItem(BATCH_KEY) || '[]'); }
-  catch { return []; }
+  try {
+    const arr = JSON.parse(localStorage.getItem(BATCH_KEY) || '[]');
+    // Backfill _submittedKey for batches saved before priority-by-time was added.
+    for (const e of arr) {
+      if (e && e._submittedKey === undefined) e._submittedKey = toSubmittedKey(e.submittedAt);
+    }
+    return arr;
+  } catch { return []; }
 }
 function saveBatch() { localStorage.setItem(BATCH_KEY, JSON.stringify(state.batch)); }
+function loadQuotaConfig() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(QUOTA_CONFIG_KEY) || 'null');
+    if (!raw) return null;
+    return {
+      weekday: Math.max(0, Number(raw.weekday) || 0),
+      weekend: Math.max(0, Number(raw.weekend) || 0),
+      overrides: Array.isArray(raw.overrides) ? raw.overrides.map(o => ({
+        id: o.id || uid(),
+        from: String(o.from || ''),
+        to: String(o.to || ''),
+        quota: Math.max(0, Number(o.quota) || 0),
+        note: String(o.note || ''),
+        ts: Number(o.ts) || 0,
+      })).filter(o => o.from && o.to) : [],
+    };
+  } catch { return null; }
+}
+function saveQuotaConfig() {
+  const payload = {
+    weekday: state.weekdayQuota,
+    weekend: state.weekendQuota,
+    overrides: state.quotaOverrides,
+  };
+  localStorage.setItem(QUOTA_CONFIG_KEY, JSON.stringify(payload));
+  markDirty();
+}
 function loadBakedPatches() {
   try { return JSON.parse(localStorage.getItem(BAKED_PATCHES_KEY) || '{}'); }
   catch { return {}; }
@@ -451,6 +486,26 @@ function* iterDates(a, b) {
     yield d.toISOString().slice(0, 10);
   }
 }
+// Per-date daily cap. Overrides win over weekday/weekend defaults; among
+// overrides, the narrower range wins (carve-outs beat baselines), with the
+// most-recently-added override breaking ties.
+function quotaForDate(iso) {
+  let best = null;
+  let bestSpan = Infinity;
+  let bestTs = -Infinity;
+  for (const o of state.quotaOverrides) {
+    if (!o.from || !o.to) continue;
+    if (iso < o.from || iso > o.to) continue;
+    const span = daysInRange(o.from, o.to);
+    const ts = o.ts || 0;
+    if (span < bestSpan || (span === bestSpan && ts >= bestTs)) {
+      best = o; bestSpan = span; bestTs = ts;
+    }
+  }
+  if (best) return Math.max(0, Number(best.quota) || 0);
+  return isWeekend(iso) ? state.weekendQuota : state.weekdayQuota;
+}
+
 function isWeekend(iso) {
   const dow = new Date(iso + 'T00:00:00').getDay();
   return dow === 0 || dow === 6;
@@ -497,6 +552,40 @@ function toIso(v) {
   const d = new Date(s);
   if (!isNaN(d)) return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0, 10);
   return null;
+}
+
+// Normalise 送出時間 to a sortable ISO timestamp. Empty input returns ''
+// (callers treat empty as lowest priority). Tolerates Excel serials, Date,
+// `YYYY/M/D HH:mm[:ss]`, `YYYY-MM-DD HH:mm[:ss]`, `2026年5月2日 上午10:30`.
+function toSubmittedKey(v) {
+  if (v == null || v === '') return '';
+  if (v instanceof Date) return isNaN(v) ? '' : v.toISOString();
+  if (typeof v === 'number') {
+    const ms = EPOCH + v * 86400000;
+    return new Date(ms).toISOString();
+  }
+  let s = String(v).trim();
+  if (!s) return '';
+  s = s.replace(/(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日/, (_, y, m, d) => `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`);
+  let bumpHours = 0;
+  if (/下午|PM/i.test(s)) bumpHours = 12;
+  s = s.replace(/上午|下午|AM|PM/gi, '').trim();
+  s = s.replace(/\//g, '-');
+  // Hour-bump applies only to 12-hour clock readings; 13-23 is already PM.
+  const hm = s.match(/(\d{4}-\d{1,2}-\d{1,2})[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?/);
+  if (hm) {
+    let h = Number(hm[2]);
+    if (bumpHours && h < 12) h += 12;
+    if (!bumpHours && h === 12 && /上午|AM/i.test(String(v))) h = 0;
+    const [y, mo, d] = hm[1].split('-');
+    const iso = `${y}-${mo.padStart(2,'0')}-${d.padStart(2,'0')}T${String(h).padStart(2,'0')}:${hm[3].padStart(2,'0')}:${(hm[4]||'00').padStart(2,'0')}`;
+    const dt = new Date(iso);
+    if (!isNaN(dt)) return new Date(dt.getTime() - dt.getTimezoneOffset()*60000).toISOString();
+  }
+  if (/^\d+(\.\d+)?$/.test(s)) return toSubmittedKey(Number(s));
+  const d = new Date(s);
+  if (!isNaN(d)) return new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString();
+  return '';
 }
 
 // =============== APPROVED-DAY MAP ===============
@@ -561,7 +650,8 @@ function predict(entry, dayMap, personYearUsed) {
   const conflicts = [];
   for (const d of iterDates(entry.start, entry.end)) {
     const cur = dayMap.get(d) || 0;
-    if (cur >= state.quota) conflicts.push({ d, cur });
+    const cap = quotaForDate(d);
+    if (cur >= cap) conflicts.push({ d, cur, cap });
   }
   if (conflicts.length) {
     return { cls: 'fail', reason: '已超過上限人數', conflicts };
@@ -569,8 +659,9 @@ function predict(entry, dayMap, personYearUsed) {
   return { cls: 'pass', reason: '', conflicts: [] };
 }
 
-// Re-run prediction for every batch entry. Earlier "pass" entries occupy quota slots and
-// consume yearly points before later entries are tested.
+// Re-run prediction for every batch entry. Priority follows 送出時間 ascending
+// (earlier submission wins contention); rows missing 送出時間 are evaluated last,
+// in their array-order positions. Sheet display order in state.batch is preserved.
 function recomputeBatch() {
   const baseMap = buildDayMap(false); // history only
   const personYearUsed = new Map();
@@ -580,7 +671,16 @@ function recomputeBatch() {
     const key = `${e.name}|${year}`;
     if (!personYearUsed.has(key)) personYearUsed.set(key, personPointsUsed(e.name, year));
   }
-  for (const e of state.batch) {
+  const ordered = state.batch
+    .map((e, i) => ({ e, i }))
+    .sort((a, b) => {
+      const ka = a.e._submittedKey || '￿';
+      const kb = b.e._submittedKey || '￿';
+      if (ka < kb) return -1;
+      if (ka > kb) return 1;
+      return a.i - b.i;
+    });
+  for (const { e } of ordered) {
     e.predicted = predict(e, baseMap, personYearUsed);
     const eff = e.decision === 'auto' ? e.predicted.cls : e.decision;
     if (eff === 'pass' && e.start && e.end && e.end >= e.start) {
@@ -792,16 +892,20 @@ function parseUploadedRows(rows) {
     toast(`找不到必要欄位（姓名/起日/迄日）。表頭：${headerRow.join(', ')}`);
     return [];
   }
-  return dataRows.map(r => ({
-    id: uid(),
-    name: String(r[kName] ?? '').trim(),
-    start: toIso(r[kStart]),
-    end:   toIso(r[kEnd]),
-    daysCat: kCat ? String(r[kCat] ?? '').trim() : '',
-    submittedAt: kSub ? String(r[kSub] ?? '') : '',
-    decision: 'auto', // auto means follow prediction
-    predicted: { cls: 'other', reason: '', conflicts: [] },
-  })).filter(e => e.name || e.start || e.end);
+  return dataRows.map(r => {
+    const submittedAt = kSub ? String(r[kSub] ?? '') : '';
+    return {
+      id: uid(),
+      name: String(r[kName] ?? '').trim(),
+      start: toIso(r[kStart]),
+      end:   toIso(r[kEnd]),
+      daysCat: kCat ? String(r[kCat] ?? '').trim() : '',
+      submittedAt,
+      _submittedKey: toSubmittedKey(submittedAt),
+      decision: 'auto', // auto means follow prediction
+      predicted: { cls: 'other', reason: '', conflicts: [] },
+    };
+  }).filter(e => e.name || e.start || e.end);
 }
 
 function handleFile(file) {
@@ -830,7 +934,7 @@ function renderBatch() {
   $('batchCount').textContent = state.batch.length;
   const body = $('batchBody');
   if (!state.batch.length) {
-    body.innerHTML = `<tr><td colspan="8" class="empty">尚未上傳任何申請</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="empty">尚未上傳任何申請</td></tr>`;
     return;
   }
   body.innerHTML = state.batch.map(e => {
@@ -839,7 +943,7 @@ function renderBatch() {
     const pillCls = eff === 'pass' ? 'pass' : eff === 'fail' ? 'fail' : 'other';
     const pillLabel = eff === 'pass' ? '通過' : eff === 'fail' ? '未通過' : '—';
     const conflictHtml = e.predicted.conflicts.length
-      ? `<div class="conflict-list">已滿日：${e.predicted.conflicts.map(c => `${c.d}(${c.cur})`).join(', ')}</div>`
+      ? `<div class="conflict-list">已滿日：${e.predicted.conflicts.map(c => `${c.d}(${c.cur}/${c.cap ?? '-'})`).join(', ')}</div>`
       : '';
     const predLabel = e.predicted.cls === 'pass' ? '通過'
       : e.predicted.cls === 'fail' ? `未通過 - ${e.predicted.reason}` : '—';
@@ -851,8 +955,15 @@ function renderBatch() {
         ${catOptions.map(o => `<option value="${escapeHtml(o)}" ${e.daysCat===o?'selected':''}>${escapeHtml(o==='>10天'?'10天以上':o)}</option>`).join('')}
         ${hasStdCat ? '' : `<option value="${escapeHtml(e.daysCat)}" selected>${escapeHtml(e.daysCat)}</option>`}
       </select>`;
+    const subDisplay = e._submittedKey
+      ? e._submittedKey.slice(0, 16).replace('T', ' ')
+      : (e.submittedAt || '—');
+    const subTitle = e.submittedAt && e._submittedKey && e.submittedAt !== subDisplay
+      ? ` title="原始：${escapeHtml(e.submittedAt)}"`
+      : '';
     return `<tr>
       <td><input class="edit-cell edit-name" type="text" data-id="${e.id}" value="${escapeHtml(e.name)}" placeholder="姓名" /></td>
+      <td class="date"${subTitle}>${escapeHtml(subDisplay)}</td>
       <td><input class="edit-cell edit-date edit-start" type="date" data-id="${e.id}" value="${escapeHtml(e.start || '')}" /></td>
       <td><input class="edit-cell edit-date edit-end" type="date" data-id="${e.id}" value="${escapeHtml(e.end || '')}" /></td>
       <td class="num">${days}</td>
@@ -916,9 +1027,10 @@ function renderDayGrid() {
   const sorted = Array.from(dates).sort();
   $('dayGrid').innerHTML = sorted.map(d => {
     const n = map.get(d) || 0;
-    const cls = n >= state.quota ? 'full' : (n === state.quota - 1 ? 'tight' : '');
+    const cap = quotaForDate(d);
+    const cls = n >= cap ? 'full' : (n === cap - 1 ? 'tight' : '');
     const dow = ['日','一','二','三','四','五','六'][new Date(d+'T00:00:00').getDay()];
-    return `<div class="day-cell ${cls}"><div class="d">${d} (${dow})</div><div class="n">${n} / ${state.quota}</div></div>`;
+    return `<div class="day-cell ${cls}"><div class="d">${d} (${dow})</div><div class="n">${n} / ${cap}</div></div>`;
   }).join('');
 }
 
@@ -1072,18 +1184,60 @@ function renderCommittedRecords() {
   });
 }
 
+function renderQuotaOverrides() {
+  const body = $('quotaOverrideBody');
+  if (!body) return;
+  if (!state.quotaOverrides.length) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">尚未設定任何例外</td></tr>`;
+    return;
+  }
+  const sorted = state.quotaOverrides
+    .map((o, i) => ({ o, i }))
+    .sort((a, b) => (a.o.from || '').localeCompare(b.o.from || '') || a.i - b.i);
+  body.innerHTML = sorted.map(({ o }) => `<tr>
+    <td><input class="edit-cell qov-from" type="date" data-id="${o.id}" value="${escapeHtml(o.from || '')}" /></td>
+    <td><input class="edit-cell qov-to" type="date" data-id="${o.id}" value="${escapeHtml(o.to || '')}" /></td>
+    <td><input class="edit-cell qov-quota" type="number" min="0" data-id="${o.id}" value="${o.quota}" /></td>
+    <td><input class="edit-cell qov-note" type="text" data-id="${o.id}" value="${escapeHtml(o.note || '')}" placeholder="（選填）" /></td>
+    <td><button class="ghost" data-qov-remove="${o.id}">移除</button></td>
+  </tr>`).join('');
+  function findOverride(id) { return state.quotaOverrides.find(x => x.id === id); }
+  function bumpAndSave(o) { o.ts = Date.now(); saveQuotaConfig(); renderManager(); }
+  body.querySelectorAll('input.qov-from').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.from = el.value; bumpAndSave(o);
+  });
+  body.querySelectorAll('input.qov-to').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.to = el.value; bumpAndSave(o);
+  });
+  body.querySelectorAll('input.qov-quota').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.quota = Math.max(0, Number(el.value) || 0); bumpAndSave(o);
+  });
+  body.querySelectorAll('input.qov-note').forEach(el => el.onchange = () => {
+    const o = findOverride(el.dataset.id); if (!o) return; o.note = el.value; bumpAndSave(o);
+  });
+  body.querySelectorAll('button[data-qov-remove]').forEach(btn => btn.onclick = () => {
+    state.quotaOverrides = state.quotaOverrides.filter(x => x.id !== btn.dataset.qovRemove);
+    saveQuotaConfig();
+    renderManager();
+  });
+}
+
 function renderManager() {
-  $('quota').value = state.quota;
+  $('weekdayQuota').value = state.weekdayQuota;
+  $('weekendQuota').value = state.weekendQuota;
   $('minDays').value = state.minDays;
   $('maxDays').value = state.maxDays;
   $('yearlyPoints').value = state.yearlyPoints;
   $('gateDay').value = state.gateDay;
   const w = roundWindow();
+  const ovCount = state.quotaOverrides.length;
+  const quotaDesc = `平日 ${state.weekdayQuota} 人 / 假日 ${state.weekendQuota} 人${ovCount ? `（另有 ${ovCount} 筆例外）` : ''}`;
   $('windowHelp').innerHTML = w
-    ? `<b>本輪可預約範圍：${w.from} ～ ${w.to}</b>（含）。單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。`
-    : `規則：單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${state.quota} 人、每人每年 ${state.yearlyPoints} 次核准。<br/>請填入 Gate Day 以啟用「可預約範圍」檢查。`;
+    ? `<b>本輪可預約範圍：${w.from} ～ ${w.to}</b>（含）。單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${quotaDesc}、每人每年 ${state.yearlyPoints} 次核准。`
+    : `規則：單筆 ${state.minDays}–${state.maxDays} 天、每日上限 ${quotaDesc}、每人每年 ${state.yearlyPoints} 次核准。<br/>請填入 Gate Day 以啟用「可預約範圍」檢查。`;
   renderBatch();
   renderCommittedRecords();
+  renderQuotaOverrides();
   renderSyncPanel();
 }
 
@@ -1149,13 +1303,18 @@ async function pushToSheet(quiet = false) {
   const url = getSheetUrl();
   if (!url) { if (!quiet) toast('請先設定 Web App URL'); return; }
   const records = buildSheetRecords();
+  const quotaConfig = {
+    weekday: state.weekdayQuota,
+    weekend: state.weekendQuota,
+    overrides: state.quotaOverrides,
+  };
   const statusEl = document.getElementById('syncStatus');
   if (statusEl) statusEl.textContent = '上傳中…';
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'overwrite', records }),
+      body: JSON.stringify({ action: 'overwrite', records, quotaConfig }),
       redirect: 'follow',
     });
     const data = await res.json();
@@ -1220,6 +1379,27 @@ async function pullFromSheet(quiet = false) {
     }
     saveBakedPatches(newPatches);
     saveStored(newStored);
+    if (data.quotaConfig && typeof data.quotaConfig === 'object') {
+      const qc = data.quotaConfig;
+      if (Number.isFinite(Number(qc.weekday))) state.weekdayQuota = Math.max(0, Number(qc.weekday));
+      if (Number.isFinite(Number(qc.weekend))) state.weekendQuota = Math.max(0, Number(qc.weekend));
+      if (Array.isArray(qc.overrides)) {
+        state.quotaOverrides = qc.overrides.map(o => ({
+          id: o.id || uid(),
+          from: String(o.from || ''),
+          to: String(o.to || ''),
+          quota: Math.max(0, Number(o.quota) || 0),
+          note: String(o.note || ''),
+          ts: Number(o.ts) || 0,
+        })).filter(o => o.from && o.to);
+      }
+      // Persist locally without re-marking dirty (clearDirty below will reset state).
+      localStorage.setItem(QUOTA_CONFIG_KEY, JSON.stringify({
+        weekday: state.weekdayQuota,
+        weekend: state.weekendQuota,
+        overrides: state.quotaOverrides,
+      }));
+    }
     setLastSync(new Date().toISOString());
     clearDirty();
     renderView();
@@ -1416,7 +1596,6 @@ function showTab(name) {
 }
 
 // =============== CALENDAR TAB ===============
-const CAL_FULL_THRESHOLD = 2;
 const calState = { year: 0, month: 0, selected: '' };
 
 function calOccupancy() {
@@ -1433,10 +1612,10 @@ function calOccupancy() {
   return map;
 }
 
-function calLevel(count) {
+function calLevel(count, cap) {
   if (count <= 0) return 0;
-  if (count < CAL_FULL_THRESHOLD) return 1;
-  return 2;
+  if (count >= cap) return 2;
+  return 1;
 }
 
 function renderCalendar() {
@@ -1455,9 +1634,10 @@ function renderCalendar() {
     const iso = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const list = occ.get(iso) || [];
     const cnt = list.length;
-    const lvl = calLevel(cnt);
+    const cap = quotaForDate(iso);
+    const lvl = calLevel(cnt, cap);
     const sel = iso === calState.selected ? ' selected' : '';
-    const label = cnt === 0 ? '空' : `${cnt} 人`;
+    const label = cnt === 0 ? '空' : `${cnt}/${cap}`;
     html += `<div class="cal-cell lvl${lvl}${sel}" data-d="${iso}"><div class="num">${d}</div><div class="cnt">${label}</div></div>`;
   }
   const total = startDow + daysInMonth;
@@ -1540,7 +1720,28 @@ function bindView() {
 }
 
 function bindManager() {
-  $('quota').onchange = (e) => { state.quota = Math.max(1, Number(e.target.value) || 1); renderManager(); };
+  $('weekdayQuota').onchange = (e) => {
+    state.weekdayQuota = Math.max(0, Number(e.target.value) || 0);
+    saveQuotaConfig();
+    renderManager();
+  };
+  $('weekendQuota').onchange = (e) => {
+    state.weekendQuota = Math.max(0, Number(e.target.value) || 0);
+    saveQuotaConfig();
+    renderManager();
+  };
+  $('addQuotaOverride').onclick = () => {
+    state.quotaOverrides.push({
+      id: uid(),
+      from: '',
+      to: '',
+      quota: state.weekdayQuota,
+      note: '',
+      ts: Date.now(),
+    });
+    saveQuotaConfig();
+    renderManager();
+  };
   $('minDays').onchange = (e) => { state.minDays = Math.max(1, Number(e.target.value) || 1); renderManager(); };
   $('maxDays').onchange = (e) => { state.maxDays = Math.max(1, Number(e.target.value) || 1); renderManager(); };
   $('yearlyPoints').onchange = (e) => { state.yearlyPoints = Math.max(1, Number(e.target.value) || 1); renderManager(); };
@@ -1561,7 +1762,8 @@ function bindManager() {
     const end = $('mEnd').value;
     const daysCat = $('mDays').value;
     if (!name || !start || !end) { toast('請填寫姓名、起日、迄日'); return; }
-    state.batch.push({ id: uid(), name, start, end, daysCat, submittedAt: '', decision: 'auto', predicted: { cls:'other', reason:'', conflicts:[] } });
+    const submittedAt = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    state.batch.push({ id: uid(), name, start, end, daysCat, submittedAt, _submittedKey: toSubmittedKey(submittedAt), decision: 'auto', predicted: { cls:'other', reason:'', conflicts:[] } });
     saveBatch();
     $('mName').value = ''; $('mStart').value = ''; $('mEnd').value = '';
     renderBatch();
@@ -1643,6 +1845,12 @@ document.getElementById('unlockForm').addEventListener('submit', async (e) => {
 });
 
 state.batch = loadBatch();
+const _quotaCfg = loadQuotaConfig();
+if (_quotaCfg) {
+  state.weekdayQuota = _quotaCfg.weekday;
+  state.weekendQuota = _quotaCfg.weekend;
+  state.quotaOverrides = _quotaCfg.overrides;
+}
 bindView();
 bindCalendar();
 bindEditModal();
@@ -1659,8 +1867,11 @@ MANAGER_HTML_BLOCK = """\
 <div class="panel">
   <h2>審核規則</h2>
   <div class="controls">
-    <label>每日通過上限人數
-      <input id="quota" type="number" min="1" value="2" />
+    <label>平日上限（週一~週五）
+      <input id="weekdayQuota" type="number" min="0" value="2" />
+    </label>
+    <label>假日上限（週六、週日）
+      <input id="weekendQuota" type="number" min="0" value="4" />
     </label>
     <label>單筆預假最少天數
       <input id="minDays" type="number" min="1" value="4" />
@@ -1676,9 +1887,31 @@ MANAGER_HTML_BLOCK = """\
     </label>
   </div>
   <div class="help" id="windowHelp">
-    規則：單筆 4–10 天、每日最多 2 人、每人每年 12 次核准（每筆通過扣 1 點，依起日年份計算），
+    規則：單筆 4–10 天、平日 2 人 / 假日 4 人、每人每年 12 次核准（每筆通過扣 1 點，依起日年份計算），
     預假日須落在 <b>Gate Day</b> 至 <b>(Gate Day + 7 個月) 之次月首個週日</b> 之間。
-    留空 Gate Day 則略過範圍檢查。
+    留空 Gate Day 則略過範圍檢查。可在下方「上限例外」設定特定日期區間的不同上限（範圍越窄者優先）。
+  </div>
+</div>
+
+<div class="panel">
+  <h2>上限例外</h2>
+  <div class="help">
+    指定日期或區間使用不同的每日上限。多筆例外重疊時，<b>範圍越窄</b>者優先（例如「12/24~12/26」會蓋過「整個 12 月」）；範圍相同則以最新一筆為準。
+  </div>
+  <div class="table-wrap" style="border:none;">
+    <table>
+      <thead><tr>
+        <th class="no-sort">起日</th>
+        <th class="no-sort">迄日</th>
+        <th class="no-sort">上限人數</th>
+        <th class="no-sort">備註</th>
+        <th class="no-sort">操作</th>
+      </tr></thead>
+      <tbody id="quotaOverrideBody"><tr><td colspan="5" class="empty">尚未設定任何例外</td></tr></tbody>
+    </table>
+  </div>
+  <div class="actions-row">
+    <button class="primary" id="addQuotaOverride">＋ 新增例外</button>
   </div>
 </div>
 
@@ -1715,6 +1948,7 @@ MANAGER_HTML_BLOCK = """\
     <table>
       <thead><tr>
         <th class="no-sort">姓名</th>
+        <th class="no-sort">送出時間</th>
         <th class="no-sort">起日</th>
         <th class="no-sort">迄日</th>
         <th class="no-sort">天數</th>
@@ -1723,7 +1957,7 @@ MANAGER_HTML_BLOCK = """\
         <th class="no-sort">最終決定</th>
         <th class="no-sort">操作</th>
       </tr></thead>
-      <tbody id="batchBody"><tr><td colspan="8" class="empty">尚未上傳任何申請</td></tr></tbody>
+      <tbody id="batchBody"><tr><td colspan="9" class="empty">尚未上傳任何申請</td></tr></tbody>
     </table>
   </div>
   <div class="actions-row">

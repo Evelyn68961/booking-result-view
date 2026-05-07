@@ -9,7 +9,10 @@ This file is the source-of-truth for the approval rules applied by 預假紀錄�
 - Bookable window: Gate Day → first Sunday of the month after (Gate Day + 7 months), inclusive. If Gate Day is left blank in the UI, the range check is skipped.
 - Each submission: 1 consecutive block of **4–10 days** (configurable: `minDays` / `maxDays`).
 - Multiple blocks per person allowed.
-- Max **2 people per day** per calendar date, counted across all approved blocks (configurable: `quota`).
+- Daily cap, counted across all approved blocks, depends on the date:
+  - Weekdays (Mon–Fri) default: **2 people** (configurable: `weekdayQuota`).
+  - Weekends (Sat–Sun) default: **4 people** (configurable: `weekendQuota`).
+  - Range overrides set in the manager tab's 「上限例外」 panel take precedence over the weekday/weekend defaults. When multiple overrides cover the same date, the **narrower range wins** (carve-outs beat baselines); ties are broken by most-recently-edited.
 - **每人每年 12 點**：each approved submission consumes 1 point regardless of length, counted in the calendar year of the booking's **start date**. When a person's points for that year reach 12, further submissions for the same year are rejected (configurable: `yearlyPoints`).
 
 ### Reject reasons (zh-TW, surfaced verbatim in the預測欄)
@@ -25,4 +28,4 @@ Yearly points are counted per *approved submission*, not per day. A 4-day approv
 
 ### Priority
 
-Within a single contention window, priority follows submission order (`送出時間` / server timestamp). The manager tab does not re-order — it evaluates申請 in the order they appear in the uploaded sheet, so the existing approved set + the申請 above the current row act as the baseline for capacity checks.
+Within a single contention window, priority follows submission order (`送出時間` / server timestamp): the earliest submission wins. The manager tab sorts a working copy of the batch by `送出時間` ascending before evaluation, so the existing approved set + every申請 with an earlier timestamp act as the baseline for capacity checks. Display order in the UI is unchanged — the sort only affects evaluation order. Rows missing a `送出時間` value (e.g. manually-added rows whose timestamp isn't filled in) sort last and are evaluated after every timestamped申請; ties on `送出時間` fall back to the sheet's row order.
