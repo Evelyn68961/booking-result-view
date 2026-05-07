@@ -235,6 +235,10 @@
         <input id="pwInput" type="password" autocomplete="new-password" placeholder="密碼" />
         <button class="primary" type="submit">解鎖</button>
       </form>
+      <label class="help" style="display:flex; align-items:center; gap:6px; margin-top:10px; justify-content:center; cursor:pointer;">
+        <input id="rememberPw" type="checkbox" />
+        <span>在此電腦記住密碼（最多 6 台裝置，需先設定 Google Sheet 同步）</span>
+      </label>
       <div class="err" id="unlockErr"></div>
     </div>
     <div id="managerContent"></div>
@@ -283,6 +287,9 @@ const BAKED_PATCHES_KEY = 'booking-baked-patches-v1';
 const SHEET_URL_KEY = 'booking-sheet-url-v1';
 const SHEET_LAST_SYNC_KEY = 'booking-sheet-last-sync-v1';
 const QUOTA_CONFIG_KEY = 'booking-quota-config-v1';
+const SAVED_PASSWORD_KEY = 'booking-manager-password-v1';
+const DEVICE_ID_KEY = 'booking-device-id-v1';
+const PASSWORD_SLOT_LIMIT = 6;
 
 // =============== STATE ===============
 const state = {
@@ -347,6 +354,56 @@ function saveQuotaConfig() {
   };
   localStorage.setItem(QUOTA_CONFIG_KEY, JSON.stringify(payload));
   markDirty();
+}
+
+function getDeviceId() {
+  let id = localStorage.getItem(DEVICE_ID_KEY);
+  if (!id) {
+    id = (crypto.randomUUID && crypto.randomUUID()) || ('d-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10));
+    localStorage.setItem(DEVICE_ID_KEY, id);
+  }
+  return id;
+}
+function deviceLabel() {
+  const ua = navigator.userAgent || '';
+  let browser = 'Browser';
+  if (/Edg\//.test(ua)) browser = 'Edge';
+  else if (/Chrome\//.test(ua)) browser = 'Chrome';
+  else if (/Firefox\//.test(ua)) browser = 'Firefox';
+  else if (/Safari\//.test(ua)) browser = 'Safari';
+  let os = 'OS';
+  if (/Windows/.test(ua)) os = 'Windows';
+  else if (/Macintosh|Mac OS X/.test(ua)) os = 'Mac';
+  else if (/Android/.test(ua)) os = 'Android';
+  else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+  else if (/Linux/.test(ua)) os = 'Linux';
+  return `${browser} on ${os} · ${new Date().toISOString().slice(0, 10)}`;
+}
+function getSavedPassword() { return localStorage.getItem(SAVED_PASSWORD_KEY) || ''; }
+function setSavedPassword(pw) { localStorage.setItem(SAVED_PASSWORD_KEY, pw); }
+function clearSavedPassword() { localStorage.removeItem(SAVED_PASSWORD_KEY); }
+
+let PASSWORD_SLOTS_CACHE = [];
+async function callSheetAction(action, body) {
+  const url = getSheetUrl();
+  if (!url) throw new Error('尚未設定 Google Sheet 同步');
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ action }, body || {})),
+    redirect: 'follow',
+  });
+  return res.json();
+}
+async function claimPasswordSlot() {
+  const data = await callSheetAction('claimPasswordSlot', { deviceId: getDeviceId(), label: deviceLabel() });
+  if (Array.isArray(data.slots)) PASSWORD_SLOTS_CACHE = data.slots;
+  return data;
+}
+async function releasePasswordSlot(deviceId) {
+  const data = await callSheetAction('releasePasswordSlot', { deviceId });
+  if (Array.isArray(data.slots)) PASSWORD_SLOTS_CACHE = data.slots;
+  return data;
 }
 function loadBakedPatches() {
   try { return JSON.parse(localStorage.getItem(BAKED_PATCHES_KEY) || '{}'); }
@@ -1159,6 +1216,7 @@ function renderManager() {
   renderCommittedRecords();
   renderQuotaOverrides();
   renderSyncPanel();
+  renderPasswordSlots();
 }
 
 // =============== GOOGLE SHEETS SYNC ===============
@@ -1320,6 +1378,13 @@ async function pullFromSheet(quiet = false) {
         overrides: state.quotaOverrides,
       }));
     }
+    if (Array.isArray(data.passwordSlots)) {
+      PASSWORD_SLOTS_CACHE = data.passwordSlots;
+      // If our slot has been removed elsewhere, drop the local saved password.
+      if (getSavedPassword() && !data.passwordSlots.some(s => s.deviceId === getDeviceId())) {
+        clearSavedPassword();
+      }
+    }
     setLastSync(new Date().toISOString());
     clearDirty();
     renderView();
@@ -1362,6 +1427,107 @@ function startAutoSync() {
   if (getSheetUrl()) setTimeout(() => autoSyncTick('focus'), 200);
 }
 
+async function refreshPasswordSlotsFromSheet() {
+  const url = getSheetUrl();
+  if (!url) return;
+  try {
+    const res = await fetch(url, { method: 'GET', redirect: 'follow' });
+    const data = await res.json();
+    if (data && Array.isArray(data.passwordSlots)) {
+      PASSWORD_SLOTS_CACHE = data.passwordSlots;
+    }
+  } catch (e) {
+    console.warn('refresh slots failed', e);
+  }
+  renderPasswordSlots();
+}
+
+function renderPasswordSlots() {
+  if (!MANAGER_UNLOCKED) return;
+  let panel = document.getElementById('pwSlotsPanel');
+  if (!panel) {
+    panel = document.createElement('details');
+    panel.className = 'panel';
+    panel.id = 'pwSlotsPanel';
+    panel.innerHTML = `
+      <summary style="cursor:pointer; list-style:none;">
+        <span style="display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <span class="caret" aria-hidden="true">▸</span>
+          <h2 style="display:inline; margin:0;">🔐 已記住密碼的裝置</h2>
+          <span class="help" id="pwSlotsCount"></span>
+        </span>
+      </summary>
+      <div class="help" style="margin-top:10px;">最多 ${PASSWORD_SLOT_LIMIT} 台裝置可在本機儲存密碼以省去輸入。移除後該裝置下次造訪需重新輸入密碼。</div>
+      <div class="table-wrap" style="border:none; margin-top:8px;">
+        <table>
+          <thead><tr>
+            <th class="no-sort">裝置</th>
+            <th class="no-sort">儲存時間</th>
+            <th class="no-sort">操作</th>
+          </tr></thead>
+          <tbody id="pwSlotsBody"></tbody>
+        </table>
+      </div>
+      <div class="actions-row">
+        <button class="ghost" id="pwSlotsRefresh">🔄 重新整理</button>
+        <button class="ghost" id="pwSlotsForgetSelf">移除本機儲存</button>
+      </div>
+    `;
+    document.getElementById('managerContent').appendChild(panel);
+    panel.addEventListener('toggle', () => {
+      const c = panel.querySelector('.caret');
+      if (c) c.textContent = panel.open ? '▾' : '▸';
+      if (panel.open) refreshPasswordSlotsFromSheet();
+    });
+    document.getElementById('pwSlotsRefresh').onclick = () => refreshPasswordSlotsFromSheet();
+    document.getElementById('pwSlotsForgetSelf').onclick = async () => {
+      if (!confirm('移除本機儲存的密碼？下次造訪需重新輸入。')) return;
+      const myId = getDeviceId();
+      const hadSaved = !!getSavedPassword();
+      clearSavedPassword();
+      if (hadSaved && getSheetUrl()) {
+        try { await releasePasswordSlot(myId); } catch (e) { console.warn(e); }
+      }
+      toast('已移除本機儲存');
+      renderPasswordSlots();
+    };
+  }
+  const slots = PASSWORD_SLOTS_CACHE || [];
+  document.getElementById('pwSlotsCount').textContent = `（${slots.length}/${PASSWORD_SLOT_LIMIT}）`;
+  const myId = getDeviceId();
+  const body = document.getElementById('pwSlotsBody');
+  if (!slots.length) {
+    body.innerHTML = `<tr><td colspan="3" class="empty">${getSheetUrl() ? '尚無裝置儲存密碼' : '請先設定 Google Sheet 同步'}</td></tr>`;
+  } else {
+    body.innerHTML = slots.map(s => {
+      const isMe = s.deviceId === myId;
+      const when = s.savedAt ? s.savedAt.replace('T', ' ').slice(0, 16) : '';
+      const labelHtml = escapeHtml(s.label || '(未命名)') + (isMe ? ' · <b>本機</b>' : '');
+      return `<tr>
+        <td>${labelHtml}</td>
+        <td class="date">${escapeHtml(when)}</td>
+        <td><button class="ghost" data-pwslot-remove="${escapeHtml(s.deviceId)}">移除</button></td>
+      </tr>`;
+    }).join('');
+    body.querySelectorAll('button[data-pwslot-remove]').forEach(btn => btn.onclick = async () => {
+      const id = btn.dataset.pwslotRemove;
+      if (!confirm(id === myId ? '移除本機儲存？下次造訪需重新輸入。' : '移除此裝置的密碼儲存？該裝置下次造訪需重新輸入。')) return;
+      try {
+        const data = await releasePasswordSlot(id);
+        if (data.ok) {
+          if (id === myId) clearSavedPassword();
+          toast('已移除');
+          renderPasswordSlots();
+        } else {
+          toast('移除失敗：' + (data.error || ''));
+        }
+      } catch (e) {
+        toast('移除失敗：' + e.message);
+      }
+    });
+  }
+}
+
 function renderSyncPanel() {
   if (!MANAGER_UNLOCKED) return;
   let panel = document.getElementById('syncPanel');
@@ -1392,7 +1558,7 @@ function renderSyncPanel() {
       const c = panel.querySelector('.caret');
       if (c) c.textContent = panel.open ? '▾' : '▸';
     });
-    $('syncUrl').onchange = () => setSheetUrl($('syncUrl').value.trim());
+    $('syncUrl').onchange = () => { setSheetUrl($('syncUrl').value.trim()); refreshRememberCheckbox(); if (typeof renderPasswordSlots === 'function') renderPasswordSlots(); };
     $('syncPush').onclick = () => pushToSheet().catch(() => {});
     $('syncPull').onclick = () => pullFromSheet().catch(() => {});
   }
@@ -1725,7 +1891,7 @@ function showRange() {
 }
 
 // =============== MANAGER UNLOCK (PBKDF2 + AES-GCM) ===============
-const ENC = {"salt": "11bLt8EoWeMS+6sb0K2cZg==", "iv": "3tv44FkgvYeEyaz9", "ct": "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", "iters": 200000};  // {salt, iv, ct, iters} all base64 (except iters)
+const ENC = {"salt": "EdhYUrl7lpbRgz0EvQuPmA==", "iv": "lFkYmulUQhM+MIJb", "ct": "VuR+JH4cwBToDV08Ff30cBNMyqjUN/nvzobctwUKcZX78FR4abul6gfBeA/hTEM9o4zf3rMTg8S/PyoesjF19EPbnD1fI8vhF6esj9/rze/baYOz/tB40PTMuEBU6xFzYcTmKfbZotJrpVZbdlONDcW5Q1vG3e3zAUK+VJ+6PaxbmnrlJBDr+04nO7uNAAR6LIN3D+2xv/Wy6Qs92iiU2yMI4XAan8sVdkayAiWJXO1qdEY6AyarmeKhvABxhR3hpPMey0XFRiAtBlV8ntsYRgfdBdbbNgcUc0NK7oF9S8U/Mrq3mFQTZRy9hDjz70SIzPo9Q8WU1vhmIdann6phNGFuUkdwlJcXUZst+oJSQQCw7ZOLpkUCkd35cYBmp37h4NjdYvDCDz6gS6vevFOmvaGwbjDI3b9QIveTlbaT+QECL5VxUsIeAku4QkzyLAhoDA/LIPZilAhP95IIRqh1ycl1onxY6JBKOGhjmUqnTIGFORJuwOq06mDzeortvXgqXtlusP4N0AQEPTfcr5eCacD3UnfYNYepw4T9TeVRyKbOfYrJzrOMkUS2Bg6rYATPxLaaQK+AyfB1Idg2HbUzIFge9Cr2Mim0zUBGoRdrPRd82sYaxoMVldo8o1mYnUO/pOql4O6+hrYQaA2XbbGk4dCER+2LXfHRvKJb0XsT6+F4d3ME//vIbnGdHzc8zUlJ7U4HXT2Z/4+yyZhmFcQlELURmHNemP/igmnqA0gadn2eClRy+QZSnSuAH+wJJ/LCs6vxW/OcgJhd8Hvqc4J3N6LEV1vpoygYiU5rZb2hW5bWdmxqEUmCR5OkpckbV/kvip01ITP5dtIv4g7nK743Coj1y0tFxdVguUP3dBNhmGDxpBhCmoJS96pybzd2e+l9ZBx0bIAJITHTwi9R4/4kBQbxzUlFQqMpKyabV/at1DvTYGIKT7wbOapzfJu9LA17Tx8+T7w/HvcDg7m0MYC4MbBwMlfMa7VwOBga5b6AaOLosZNhEqAaNWgghBh9HMOKFDiibH5+xu0lhrOA4rgBrL+IE2ZNGXrwMMBV8t1d3/UdP/cpqYbYFEvVsX+KDRbrV8lHWqxfSRuSmwms1iHA6TrzxeQ/rnmzplCG0+q/LXPyYK3YTxplp5uvGsoI90ia/iwxmLqARXbtzMlxPMA89kCB/pTYnkJV5T8JGFgPr3RZxZqK6eQZYjKmHRHHfFsinBGgJu4/tlqyhqsWSUtiT+mLT2xg4F6VDn6awvJ32ZGZxo+J1CDT/AGHJCdE5tRmHX6/c155Et+ENTezBvXBPGLjTrU4gPjlvrYgRWFPK3rpf7gaNzx37ZOs90fnNjFrPw9FQJt2qFp1DDfbpTJz4t31GNdG94Eesi4OW/9+w9xuTxSFXyiQtmUaqG7F7lGI8JlLDCNJSiT87eUqb3dpifxKQeXCvnliDFs28ul3oeHmtoojZcGEfWmydfcMFzkZ6jA6v8AOZMo/cpxhig8Vtg19zInBdauvBzVWPVKxA8QXgYoMpMMOpwyBlwTFm9FOop/vF8oruUG2CgZMr9wNZsLeVopPh32uvHZ1qhafLUgAbyWWJ+cIvV1qlkhtGccj8C5uWSpyUqd9765z7376FFwLe0OO4PQ3wGaKjYYCuekwU5M0vuOA+OV24wgzPVVMqWPLbNZL4x9EnwGwqXf87aYiYcySTq29GlCHT2Yhbf4Bk+6ruH0a01rypagI8IN+BSov9gCDDlromWH37mda7h+5SwqXQwEbt4x9uPoOcOip/QZeZckFzsXJgreqXCaCC/3mpLymktR717HW2HwqecmW2nF3fUKYDAxn7iXRL/66mEdDcPxUC3m3HTBFTxiGe7QFcYF5BT6eQh0wVdM1hFY4lQ9XBSbguEBxpCVESu43rWm68akX7okK1AKOviZRexYsEQC0C70k/3fh/thWfH8XElF9QTftZcLHK3VKi4IVa95wl0JlNNHmdBdpEQByACoOhVaIZPlZwR43xVvmK8Lrl3XjQ8J9Y4LKbMMqUvFxHxal44zYAoBmlHHhYGeeUW9fkKV1e4Fdu6NtsOBA3T2zftgR/VU6TsXDytOpXkwDxc0co6zJlsBNla04cPQzHQMFxDoAGHyjYASgCPJed9tVPDvx/rwb/sH+N8HbPm7KCh9Am84PaHwnSs3tp1NfPNFk8SvxF51coGMUXbEBYQ7OzBiE/oVDGFjYLDiPHci9Gbs8G5ukA57A1O1KjCQYQ29mrngO3427CUQLF6YCNr2e83AmAiSrCmiC3IejL5lH4rH1WEGCjxcI1T8wExD7V0y+jNsrdY70riqFsCdQ8fhhZ3BKVuaKJ76Vc6jzzsd7Culoh0sCzPY9qg8ygImq9LjuYvQTGkgkbsGzeEg1D2jTIsYeTHGAJRXyUHlOHhW4EYWLmNRM66TLbD7BS9nOHrJ18yalgs+4B6kJ0+AMax1fPgFsLQZicztXNa9URYVBZNpt+bNQeeNCBqzcDtV1xCBgCsx1CNoLVhLNFz+RYlSqt7PVoIxMtnaZ4e+3mhm+sLwxVXl30L5sp9EQgozb7LJT4YgHvHOdZWujzOoHYQGg/yFJNgTreDwimp8Z5T59xfP3NlEHn0mbO/ytjqYt2547ngXAblGMVMqE6lv7BxWoQVpxz0KLykHLk69C4GlEq8cTVPivEbsRtPbKyNbnmtZtsm5mjt+zFi/UfHvoD7Wk6nV/JyKj1lOJLQ+Vq2KV3mM0ctNGkaqRGnSUo4dlt5+Wpo/1v1I8bAxQzvKIyQ5XBPAAdzD6rM3IozpC/i28nIn3XukX6f4ju2GHrB3LX1zdzUnv6Ozffhq8MiwC8L+F/Krbk0VEH3f+3Dx1O2CFqmns/ps4u5WGpPrqkfhE195AkPrCjguiQqv0K0yD1JJw+tIP4c3Ym3VxV4gUFwSxT2L/JYF9wrth/LiRWActVeTmE6nXvwZ0MqdmTQbdfbQ7/pUFksYjLI3itphbR/MkPT1J3H9OdVKr01Xxyp5HsN37Xku3w1HkIFrjxEMbe/3785cbhugI5bxzeqtwOrvieRt7r8Sz2BKrwD75+7oK3zm4JzoCm1J1OMDX4RSD5LY5k/93ycwgcL6t22288otjd1VvBxZ9rv0fKowF9JO4jq6rokW8wsKC4/C3FgJO2HKSHVq3dgaGusvDx3D5mFuOPa5omKxOyB3wbTvJdPI5hkdDpLvOWYYRnYWHgFAVFbihPvNJO93NIROha5R+xvMfibV15YH3Izzf1IoN6ffa1oDMY/9R7ig/Uw1DwCfyO5QRf42+qR8zTT4GOKmJK3hAwANzpTKeen5awfkFh/S95g4J1RJDR4FlODR5YOSTzXGDb18e0tqd7JxwpAmySXv1A62x/lZAiYhe1xdVHeQN/17UCCGGKBHrwN7M0gI/vOVoB03sFnA5cuHYTPskB7EoyV2zR3K7q41gQwgJ/ab7v2I+/3p+YG0/W/+y/XiFjQiy3HWQv52gsqfUcawpy8mo2Mnx1UlN2Aquo69HC36zk9HKOTaOYJdb7X2ntix9MTGH2Pd+XSThYT9OjqRTWm9kJoTZUX2TbKJ/haR0JM1vkGZX304xJfZAjh/cxc/6WxT4eC/GvrFgC3kyAhtM/OaOfnQM4zCt8uru8qs8REspArQ/eohWbiyzv3aw0Vide+ADIug2LFakJh6ATQU9+BQ5T/7iw0EzBX34baTEgl5ivJ+49hb0FhUBgZXy7Kj4ff5kPFuz3bfk4n68/Phy29SLv1N/JnTVWwicSu3C4xz9vjbdzur+cj+hANAlfTosjUcWolvqHnKTeculhZ8P+K411kxY2+/gTe/pT97liDlVq1TrdJ/u6MSWNq18OWQGpgdw3I2HU7ptqib+cPj4wrwWoLELIUlYAfZQ4t5FO85vGwFEY1q7NvNfTbF18TOdUmyPpCZM5lPzdAPzIOGGGqEC4nbALRxnIatACUkec5vGm1EZIXDu7do0pDjqo2HgdaPe/r9w6FX8jLwU6daQLmgny7yXPGe3CMJGRLnJv/uOwwQ6Kn+2hDEs0vZmcX2s394SgLRGo+LFEIW7T5vFGkqOTuJ+7U4kSi5S4jzJ6byjNYK+WuSiiAws3dtR6PMPYc5ZHI8c611VTqHEWPIApp2NUE8SuSW/IJ/vBeyBbploh739ZR6dslsSLyQ4nPp/wuC+gLlaWlsfadbDwIwYobBW+JhtA7cJsaqrlbk7F2HV+QK0L9sSl2elFIAn2+JavETUUbA5098+UYolaPelO+PFMYch9Q/R2Gng81LxdCCJiPz5atb4DNo/d79kOYVLP6mhPBBB+kaOAdUva+NdNc4jQ/o7os4BKJk4DVU2M1gdSP1r0RyXNbW4wIET113INqxckWtFvHhAKqAvV/FHxaaqXrZfgt9xMH4LL5IGt1/b18eSMenTtUeKTkJgv11DQoyil5phyuNox6yiEQXgAp/tgaKcb7k5KNorbzfJM7LU1eRzFvXLVKOjFRBIJrN0LvuIW2aOpi/ZPj1eKoXC//JoP0W9bv+YLaY5HuurY+8pSOg1Vu/5ex+vpacejAJRgRFb77uCIUYOtFVtXMnyurwffIqgf4zx/o9/WMpyDx0dX6JsR/SVnhAi3iNZ7TXtSLRy3pBGHGvFK1Jo9WTS8alfIIfKou21CYHMRKANEKJlKTkPQ2VIGQ3DWVdkmYu6Mfgi6bxkUrrasug0dk68/50oaQ0ye/VdFoL3Wsb2vcRgxkAgArsfDvXHW6wNLGiC5F8SJ7a7vLpAC8JlQUlLvWPgELYy5FHu+xuheClUJ3yIQYNBeYHniMUMWHIIrshxo2ofLELXqTAsZ0VEKzYwYUy0bNdDvfxGjJij4AvtsdBSOuyZK/bGDQa3TH+mDdL3QfgUwZ8vMU2SRuvRF647+Cg/JrhFuc8oFkuESalPao+MlfL3CNnujkK/8+JgH+VZVm0KUHaT0+V3CIKZZMuIFnoP1TL7nabHj+XqMrCpUd5CM2ulFmiIfSe0C2u/cKV24gyICkPV/U/4QF1WPet6XmHGMv+6DfiLF0lSwzvwUrdaBhA9UNJvJKwfE3az+y5rGh2xWHSB6TVUpGnL/etSyYIqsh06xTXWjsZoutQrR3WyhPlej5ROVUCjswCJvH8wBs8zbmGkTXpFrNFzLh7SthIKEwDVRzaS0UQUElNckscHx0XBo6eCVlBEZJRhsvdNeYmthSQlgke/Zc6QvwQnztmoELOfmIpCWQM8eesJxZ6tLu7PaJAVwefepxlDeALWG9VQhbQY0VanTaHjL/qKJzfMFS8sorUYXs2CCuRfU8eheM2b985NQKX7pSV5Mk+Hkq0iGDmHGaEIdhK8N/Cl1T3ubeze4gklyeloQgsiF+cBdH+eUQAmOVimZH+7C4duqNtazyKxaP9F5q4UGj4JBp/CCJzdTZKLB3KhTNMXLrN4i7HNaUU+ZngixIDb8ZvURc9R8WKTsmRBOt2wbQQzV4EYhXNBj4VuCZAdxAZuv6P5b4/ry3rIbSXGFKua2yoR7SZhAG6PM1486/mKBkA5mmx7ZJ3u9QkNy+ZQEBDeEXxdog9SYeHeNKCKyEDxFt6AjXTys4B0i6h59EWTY56l3fF41Xi/Aj7cRTqPJab0oCs9H8fKesbxnViIUTjKeqwn9cXXwD5mcyPrF16uePCw5sX4xe7IRKA3eTmr+QbhyY9wWxZtt/IfChwQluDR1M5vnjhjFnTcfyHKhybK1aRIoDanG929o9VU/TjXvJ+PqzFispaHR2MdWwJOXF7Z3cbnIBpVY+hzPjz64PKYOEl340UXxGqOlY19nUI9BCPJB/CYuUUA6yejDURosTvFJQ1lZL1XfFJlZBMMwaf6b0CUjpgKy1/H7tYf8bj1FevooLDbW4EFzZkSGkZfx50yaEf3i+cbzALXQ56j8eBsvzhNrtfhNJIImt4xkEn1y5JTW6JZS/HLaEmSrhuCsMBK5Q0jrLMNhDyLCErzWd+kc55wFikyMsBQ1Nl8Pdl7yMosi1rIgXbpf0Q0AM0=", "iters": 200000};  // {salt, iv, ct, iters} all base64 (except iters)
 let MANAGER_UNLOCKED = false;
 
 function b64ToBytes(s) {
@@ -1758,17 +1924,84 @@ async function unlockManager(password) {
   renderView();
 }
 
+// If a saved password exists, validate this device's slot is still registered
+// (in case another manager freed it from the sheet) and auto-unlock if so.
+async function maybeAutoUnlock() {
+  const saved = getSavedPassword();
+  if (!saved) return;
+  const url = getSheetUrl();
+  if (url) {
+    try {
+      const res = await fetch(url, { method: 'GET', redirect: 'follow' });
+      const data = await res.json();
+      const slots = (data && data.passwordSlots) || [];
+      PASSWORD_SLOTS_CACHE = slots;
+      const myId = getDeviceId();
+      if (!slots.some(s => s.deviceId === myId)) {
+        clearSavedPassword();
+        toast('此裝置的密碼儲存名額已被釋放，請重新輸入');
+        return;
+      }
+    } catch (e) {
+      // Network failure: fall through and trust localStorage. Better to let the
+      // manager work offline than to lock them out due to flaky connectivity.
+      console.warn('slot validation failed, trusting local copy', e);
+    }
+  }
+  try {
+    await unlockManager(saved);
+  } catch {
+    // Saved password no longer matches (e.g. password was rotated). Clear it.
+    clearSavedPassword();
+    toast('密碼已變更，請重新輸入');
+  }
+}
+
+function refreshRememberCheckbox() {
+  const cb = document.getElementById('rememberPw');
+  if (!cb) return;
+  const ready = !!getSheetUrl();
+  cb.disabled = !ready;
+  const label = cb.closest('label');
+  if (label) {
+    label.style.opacity = ready ? '' : '0.55';
+    label.title = ready ? '' : '請先在解鎖後設定 Google Sheet 同步 URL';
+  }
+  if (!ready) cb.checked = false;
+}
+
 document.getElementById('unlockForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const pw = document.getElementById('pwInput').value;
+  const remember = !!(document.getElementById('rememberPw') || {}).checked;
   const err = document.getElementById('unlockErr');
   err.textContent = '';
   if (!pw) { err.textContent = '請輸入密碼'; return; }
   try {
     await unlockManager(pw);
-    document.getElementById('pwInput').value = '';
   } catch {
     err.textContent = '密碼錯誤';
+    return;
+  }
+  document.getElementById('pwInput').value = '';
+  if (remember) {
+    if (!getSheetUrl()) {
+      toast('需先設定 Google Sheet 同步 URL 才能記住密碼');
+    } else {
+      try {
+        const data = await claimPasswordSlot();
+        if (data.ok) {
+          setSavedPassword(pw);
+          toast(data.alreadyClaimed ? '已更新此裝置的密碼' : `已在此電腦記住密碼（${(data.slots || []).length}/${PASSWORD_SLOT_LIMIT}）`);
+          if (typeof renderPasswordSlots === 'function') renderPasswordSlots();
+        } else {
+          toast(`無法記住密碼：${data.error || '未知錯誤'}`);
+        }
+      } catch (e2) {
+        console.error(e2);
+        toast('記住密碼時連線失敗：' + e2.message);
+      }
+    }
   }
 });
 
@@ -1785,6 +2018,8 @@ bindEditModal();
 showRange();
 renderView();
 startAutoSync();
+refreshRememberCheckbox();
+maybeAutoUnlock();
 </script>
 </body>
 </html>

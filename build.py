@@ -315,6 +315,10 @@ HTML_TEMPLATE = r"""<!doctype html>
         <input id="pwInput" type="password" autocomplete="new-password" placeholder="密碼" />
         <button class="primary" type="submit">解鎖</button>
       </form>
+      <label class="help" style="display:flex; align-items:center; gap:6px; margin-top:10px; justify-content:center; cursor:pointer;">
+        <input id="rememberPw" type="checkbox" />
+        <span>在此電腦記住密碼（最多 6 台裝置，需先設定 Google Sheet 同步）</span>
+      </label>
       <div class="err" id="unlockErr"></div>
     </div>
     <div id="managerContent"></div>
@@ -363,6 +367,9 @@ const BAKED_PATCHES_KEY = 'booking-baked-patches-v1';
 const SHEET_URL_KEY = 'booking-sheet-url-v1';
 const SHEET_LAST_SYNC_KEY = 'booking-sheet-last-sync-v1';
 const QUOTA_CONFIG_KEY = 'booking-quota-config-v1';
+const SAVED_PASSWORD_KEY = 'booking-manager-password-v1';
+const DEVICE_ID_KEY = 'booking-device-id-v1';
+const PASSWORD_SLOT_LIMIT = 6;
 
 // =============== STATE ===============
 const state = {
@@ -427,6 +434,56 @@ function saveQuotaConfig() {
   };
   localStorage.setItem(QUOTA_CONFIG_KEY, JSON.stringify(payload));
   markDirty();
+}
+
+function getDeviceId() {
+  let id = localStorage.getItem(DEVICE_ID_KEY);
+  if (!id) {
+    id = (crypto.randomUUID && crypto.randomUUID()) || ('d-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10));
+    localStorage.setItem(DEVICE_ID_KEY, id);
+  }
+  return id;
+}
+function deviceLabel() {
+  const ua = navigator.userAgent || '';
+  let browser = 'Browser';
+  if (/Edg\//.test(ua)) browser = 'Edge';
+  else if (/Chrome\//.test(ua)) browser = 'Chrome';
+  else if (/Firefox\//.test(ua)) browser = 'Firefox';
+  else if (/Safari\//.test(ua)) browser = 'Safari';
+  let os = 'OS';
+  if (/Windows/.test(ua)) os = 'Windows';
+  else if (/Macintosh|Mac OS X/.test(ua)) os = 'Mac';
+  else if (/Android/.test(ua)) os = 'Android';
+  else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+  else if (/Linux/.test(ua)) os = 'Linux';
+  return `${browser} on ${os} · ${new Date().toISOString().slice(0, 10)}`;
+}
+function getSavedPassword() { return localStorage.getItem(SAVED_PASSWORD_KEY) || ''; }
+function setSavedPassword(pw) { localStorage.setItem(SAVED_PASSWORD_KEY, pw); }
+function clearSavedPassword() { localStorage.removeItem(SAVED_PASSWORD_KEY); }
+
+let PASSWORD_SLOTS_CACHE = [];
+async function callSheetAction(action, body) {
+  const url = getSheetUrl();
+  if (!url) throw new Error('尚未設定 Google Sheet 同步');
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ action }, body || {})),
+    redirect: 'follow',
+  });
+  return res.json();
+}
+async function claimPasswordSlot() {
+  const data = await callSheetAction('claimPasswordSlot', { deviceId: getDeviceId(), label: deviceLabel() });
+  if (Array.isArray(data.slots)) PASSWORD_SLOTS_CACHE = data.slots;
+  return data;
+}
+async function releasePasswordSlot(deviceId) {
+  const data = await callSheetAction('releasePasswordSlot', { deviceId });
+  if (Array.isArray(data.slots)) PASSWORD_SLOTS_CACHE = data.slots;
+  return data;
 }
 function loadBakedPatches() {
   try { return JSON.parse(localStorage.getItem(BAKED_PATCHES_KEY) || '{}'); }
@@ -1239,6 +1296,7 @@ function renderManager() {
   renderCommittedRecords();
   renderQuotaOverrides();
   renderSyncPanel();
+  renderPasswordSlots();
 }
 
 // =============== GOOGLE SHEETS SYNC ===============
@@ -1400,6 +1458,13 @@ async function pullFromSheet(quiet = false) {
         overrides: state.quotaOverrides,
       }));
     }
+    if (Array.isArray(data.passwordSlots)) {
+      PASSWORD_SLOTS_CACHE = data.passwordSlots;
+      // If our slot has been removed elsewhere, drop the local saved password.
+      if (getSavedPassword() && !data.passwordSlots.some(s => s.deviceId === getDeviceId())) {
+        clearSavedPassword();
+      }
+    }
     setLastSync(new Date().toISOString());
     clearDirty();
     renderView();
@@ -1442,6 +1507,107 @@ function startAutoSync() {
   if (getSheetUrl()) setTimeout(() => autoSyncTick('focus'), 200);
 }
 
+async function refreshPasswordSlotsFromSheet() {
+  const url = getSheetUrl();
+  if (!url) return;
+  try {
+    const res = await fetch(url, { method: 'GET', redirect: 'follow' });
+    const data = await res.json();
+    if (data && Array.isArray(data.passwordSlots)) {
+      PASSWORD_SLOTS_CACHE = data.passwordSlots;
+    }
+  } catch (e) {
+    console.warn('refresh slots failed', e);
+  }
+  renderPasswordSlots();
+}
+
+function renderPasswordSlots() {
+  if (!MANAGER_UNLOCKED) return;
+  let panel = document.getElementById('pwSlotsPanel');
+  if (!panel) {
+    panel = document.createElement('details');
+    panel.className = 'panel';
+    panel.id = 'pwSlotsPanel';
+    panel.innerHTML = `
+      <summary style="cursor:pointer; list-style:none;">
+        <span style="display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <span class="caret" aria-hidden="true">▸</span>
+          <h2 style="display:inline; margin:0;">🔐 已記住密碼的裝置</h2>
+          <span class="help" id="pwSlotsCount"></span>
+        </span>
+      </summary>
+      <div class="help" style="margin-top:10px;">最多 ${PASSWORD_SLOT_LIMIT} 台裝置可在本機儲存密碼以省去輸入。移除後該裝置下次造訪需重新輸入密碼。</div>
+      <div class="table-wrap" style="border:none; margin-top:8px;">
+        <table>
+          <thead><tr>
+            <th class="no-sort">裝置</th>
+            <th class="no-sort">儲存時間</th>
+            <th class="no-sort">操作</th>
+          </tr></thead>
+          <tbody id="pwSlotsBody"></tbody>
+        </table>
+      </div>
+      <div class="actions-row">
+        <button class="ghost" id="pwSlotsRefresh">🔄 重新整理</button>
+        <button class="ghost" id="pwSlotsForgetSelf">移除本機儲存</button>
+      </div>
+    `;
+    document.getElementById('managerContent').appendChild(panel);
+    panel.addEventListener('toggle', () => {
+      const c = panel.querySelector('.caret');
+      if (c) c.textContent = panel.open ? '▾' : '▸';
+      if (panel.open) refreshPasswordSlotsFromSheet();
+    });
+    document.getElementById('pwSlotsRefresh').onclick = () => refreshPasswordSlotsFromSheet();
+    document.getElementById('pwSlotsForgetSelf').onclick = async () => {
+      if (!confirm('移除本機儲存的密碼？下次造訪需重新輸入。')) return;
+      const myId = getDeviceId();
+      const hadSaved = !!getSavedPassword();
+      clearSavedPassword();
+      if (hadSaved && getSheetUrl()) {
+        try { await releasePasswordSlot(myId); } catch (e) { console.warn(e); }
+      }
+      toast('已移除本機儲存');
+      renderPasswordSlots();
+    };
+  }
+  const slots = PASSWORD_SLOTS_CACHE || [];
+  document.getElementById('pwSlotsCount').textContent = `（${slots.length}/${PASSWORD_SLOT_LIMIT}）`;
+  const myId = getDeviceId();
+  const body = document.getElementById('pwSlotsBody');
+  if (!slots.length) {
+    body.innerHTML = `<tr><td colspan="3" class="empty">${getSheetUrl() ? '尚無裝置儲存密碼' : '請先設定 Google Sheet 同步'}</td></tr>`;
+  } else {
+    body.innerHTML = slots.map(s => {
+      const isMe = s.deviceId === myId;
+      const when = s.savedAt ? s.savedAt.replace('T', ' ').slice(0, 16) : '';
+      const labelHtml = escapeHtml(s.label || '(未命名)') + (isMe ? ' · <b>本機</b>' : '');
+      return `<tr>
+        <td>${labelHtml}</td>
+        <td class="date">${escapeHtml(when)}</td>
+        <td><button class="ghost" data-pwslot-remove="${escapeHtml(s.deviceId)}">移除</button></td>
+      </tr>`;
+    }).join('');
+    body.querySelectorAll('button[data-pwslot-remove]').forEach(btn => btn.onclick = async () => {
+      const id = btn.dataset.pwslotRemove;
+      if (!confirm(id === myId ? '移除本機儲存？下次造訪需重新輸入。' : '移除此裝置的密碼儲存？該裝置下次造訪需重新輸入。')) return;
+      try {
+        const data = await releasePasswordSlot(id);
+        if (data.ok) {
+          if (id === myId) clearSavedPassword();
+          toast('已移除');
+          renderPasswordSlots();
+        } else {
+          toast('移除失敗：' + (data.error || ''));
+        }
+      } catch (e) {
+        toast('移除失敗：' + e.message);
+      }
+    });
+  }
+}
+
 function renderSyncPanel() {
   if (!MANAGER_UNLOCKED) return;
   let panel = document.getElementById('syncPanel');
@@ -1472,7 +1638,7 @@ function renderSyncPanel() {
       const c = panel.querySelector('.caret');
       if (c) c.textContent = panel.open ? '▾' : '▸';
     });
-    $('syncUrl').onchange = () => setSheetUrl($('syncUrl').value.trim());
+    $('syncUrl').onchange = () => { setSheetUrl($('syncUrl').value.trim()); refreshRememberCheckbox(); if (typeof renderPasswordSlots === 'function') renderPasswordSlots(); };
     $('syncPush').onclick = () => pushToSheet().catch(() => {});
     $('syncPull').onclick = () => pullFromSheet().catch(() => {});
   }
@@ -1838,17 +2004,84 @@ async function unlockManager(password) {
   renderView();
 }
 
+// If a saved password exists, validate this device's slot is still registered
+// (in case another manager freed it from the sheet) and auto-unlock if so.
+async function maybeAutoUnlock() {
+  const saved = getSavedPassword();
+  if (!saved) return;
+  const url = getSheetUrl();
+  if (url) {
+    try {
+      const res = await fetch(url, { method: 'GET', redirect: 'follow' });
+      const data = await res.json();
+      const slots = (data && data.passwordSlots) || [];
+      PASSWORD_SLOTS_CACHE = slots;
+      const myId = getDeviceId();
+      if (!slots.some(s => s.deviceId === myId)) {
+        clearSavedPassword();
+        toast('此裝置的密碼儲存名額已被釋放，請重新輸入');
+        return;
+      }
+    } catch (e) {
+      // Network failure: fall through and trust localStorage. Better to let the
+      // manager work offline than to lock them out due to flaky connectivity.
+      console.warn('slot validation failed, trusting local copy', e);
+    }
+  }
+  try {
+    await unlockManager(saved);
+  } catch {
+    // Saved password no longer matches (e.g. password was rotated). Clear it.
+    clearSavedPassword();
+    toast('密碼已變更，請重新輸入');
+  }
+}
+
+function refreshRememberCheckbox() {
+  const cb = document.getElementById('rememberPw');
+  if (!cb) return;
+  const ready = !!getSheetUrl();
+  cb.disabled = !ready;
+  const label = cb.closest('label');
+  if (label) {
+    label.style.opacity = ready ? '' : '0.55';
+    label.title = ready ? '' : '請先在解鎖後設定 Google Sheet 同步 URL';
+  }
+  if (!ready) cb.checked = false;
+}
+
 document.getElementById('unlockForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const pw = document.getElementById('pwInput').value;
+  const remember = !!(document.getElementById('rememberPw') || {}).checked;
   const err = document.getElementById('unlockErr');
   err.textContent = '';
   if (!pw) { err.textContent = '請輸入密碼'; return; }
   try {
     await unlockManager(pw);
-    document.getElementById('pwInput').value = '';
   } catch {
     err.textContent = '密碼錯誤';
+    return;
+  }
+  document.getElementById('pwInput').value = '';
+  if (remember) {
+    if (!getSheetUrl()) {
+      toast('需先設定 Google Sheet 同步 URL 才能記住密碼');
+    } else {
+      try {
+        const data = await claimPasswordSlot();
+        if (data.ok) {
+          setSavedPassword(pw);
+          toast(data.alreadyClaimed ? '已更新此裝置的密碼' : `已在此電腦記住密碼（${(data.slots || []).length}/${PASSWORD_SLOT_LIMIT}）`);
+          if (typeof renderPasswordSlots === 'function') renderPasswordSlots();
+        } else {
+          toast(`無法記住密碼：${data.error || '未知錯誤'}`);
+        }
+      } catch (e2) {
+        console.error(e2);
+        toast('記住密碼時連線失敗：' + e2.message);
+      }
+    }
   }
 });
 
@@ -1865,6 +2098,8 @@ bindEditModal();
 showRange();
 renderView();
 startAutoSync();
+refreshRememberCheckbox();
+maybeAutoUnlock();
 </script>
 </body>
 </html>
