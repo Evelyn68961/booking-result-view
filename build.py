@@ -540,7 +540,10 @@ function daysInRange(a, b) {
 function* iterDates(a, b) {
   const ad = new Date(a + 'T00:00:00'), bd = new Date(b + 'T00:00:00');
   for (let d = ad; d <= bd; d.setDate(d.getDate() + 1)) {
-    yield d.toISOString().slice(0, 10);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    yield `${y}-${m}-${day}`;
   }
 }
 // Per-date daily cap. Overrides win over weekday/weekend defaults; among
