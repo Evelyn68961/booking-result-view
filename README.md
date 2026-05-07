@@ -87,8 +87,8 @@ What each batch exercises:
 | `batch-2026-06.xlsx` | Per-day quota (3rd person on same dates fails, partial overlap fails) |
 | `batch-2026-07.xlsx` … `batch-2026-09.xlsx` | 測試年's 12-points marathon (1/12 → 12/12 → 13/12 fails year cap) |
 | `batch-2026-10.xlsx` | **December rush** — quota contention on prime weeks, Christmas overlap, and the 2027-01-03 window-end boundary (G7 ends exactly on the boundary, G8 one day past) |
-| `batch-2026-11.xlsx` | **Priority by 送出時間** — three rows in *reverse* submission-time order; sort must run for the verdicts to come out right (H3 / H2 pass, H1 fails) |
-| `batch-2026-12.xlsx` | **Weekend cap = 4** — four bookings overlap on Sat 2026-12-12, all pass under the new 假日上限. Optional override walkthrough in the 測試說明 sheet shows tightening Sat back to 2 via 上限例外. |
+| `batch-2026-11.xlsx` | **Priority by 送出時間** — three rows on a clean Tue-Fri December week (12/1-12/4) in *reverse* submission-time order; sort must run for the verdicts to come out right (H3 / H2 pass, H1 fails) |
+| `batch-2026-12.xlsx` | **Weekend cap = 4** — four bookings all Sat-Tue 2026-12-12 through 12-15. I1 / I2 pass; I3 / I4 fail at Mon-Tue (cap=2). The 已滿日 line on the rejected rows lists only Mon and Tue — Sat / Sun are NOT listed because 假日上限=4 leaves them under cap (3/4). Under the old single quota=2, those rows would have failed at Sat first. The 測試說明 sheet documents an optional 上限例外 walkthrough (12/12 → 1) that flips the binding date back to Saturday. |
 
 Each xlsx has the upload payload on the first sheet (`新申請`) and the
 expected verdict for every row documented on the second sheet (`測試說明`).
