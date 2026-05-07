@@ -68,7 +68,7 @@ The 「移除所有已儲存的新增紀錄」button clears `booking-extra-recor
 ## Test scenarios
 
 Run `python make_tests.py` to regenerate the monthly batch files
-(`batch-2026-04.xlsx` … `batch-2026-10.xlsx`). Recommended manager-tab settings:
+(`batch-2026-04.xlsx` … `batch-2026-12.xlsx`). Recommended manager-tab settings:
 
 - Gate Day = `2026-05-02` → bookable window 2026-05-02 ~ 2027-01-03
 - 平日上限 = 2 / 假日上限 = 4 / 單筆 4–10 天 / 年度 12 點 (上限例外 empty)
@@ -87,6 +87,8 @@ What each batch exercises:
 | `batch-2026-06.xlsx` | Per-day quota (3rd person on same dates fails, partial overlap fails) |
 | `batch-2026-07.xlsx` … `batch-2026-09.xlsx` | 測試年's 12-points marathon (1/12 → 12/12 → 13/12 fails year cap) |
 | `batch-2026-10.xlsx` | **December rush** — quota contention on prime weeks, Christmas overlap, and the 2027-01-03 window-end boundary (G7 ends exactly on the boundary, G8 one day past) |
+| `batch-2026-11.xlsx` | **Priority by 送出時間** — three rows in *reverse* submission-time order; sort must run for the verdicts to come out right (H3 / H2 pass, H1 fails) |
+| `batch-2026-12.xlsx` | **Weekend cap = 4** — four bookings overlap on Sat 2026-12-12, all pass under the new 假日上限. Optional override walkthrough in the 測試說明 sheet shows tightening Sat back to 2 via 上限例外. |
 
 Each xlsx has the upload payload on the first sheet (`新申請`) and the
 expected verdict for every row documented on the second sheet (`測試說明`).
