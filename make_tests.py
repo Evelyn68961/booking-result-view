@@ -127,36 +127,43 @@ batches = {
         ("G8. 未通過 — 迄日 2027-01-04 超出視窗", "測試戌", D(2026, 12, 31), D(2027,  1,  4), "未通過 - 超出可預約範圍"),
     ],
 
-    # Priority-by-送出時間 — three people contend for a Mon-Thu (cap=2) window.
-    # Rows ship in REVERSE submission order (row 1 = latest, row 3 = earliest)
-    # so the verdicts only come out right if recomputeBatch() sorts by
-    # submittedAt before evaluating. Under a broken sort that just walked
-    # state.batch in array order, H1 would pass and H3 would fail.
+    # Priority-by-送出時間 — three people contend for a Tue-Fri (cap=2) window
+    # in early December (12/1-12/4 is clean: G1/G2 fill 12/7-12/11, but the
+    # earlier December week is empty). Rows ship in REVERSE submission order
+    # (row 1 = latest, row 3 = earliest) so the verdicts only come out right if
+    # recomputeBatch() sorts by submittedAt before evaluating. Under a broken
+    # sort that just walked state.batch in array order, H1 would pass and H3
+    # would fail.
     (2026, 11): [
-        ("H1. 未通過 — 最晚送出，輸掉名額",     "測試零", D(2026, 11, 23), D(2026, 11, 26), "未通過 - 已超過上限人數",
+        ("H1. 未通過 — 最晚送出，輸掉名額",     "測試零", D(2026, 12,  1), D(2026, 12,  4), "未通過 - 已超過上限人數",
          "2026-11-25 18:00"),
-        ("H2. 通過 — 次早送出，拿到第 2 名額",   "測試壹", D(2026, 11, 23), D(2026, 11, 26), "通過",
+        ("H2. 通過 — 次早送出，拿到第 2 名額",   "測試壹", D(2026, 12,  1), D(2026, 12,  4), "通過",
          "2026-11-25 12:00"),
-        ("H3. 通過 — 最早送出，拿到第 1 名額",   "測試貳", D(2026, 11, 23), D(2026, 11, 26), "通過",
+        ("H3. 通過 — 最早送出，拿到第 1 名額",   "測試貳", D(2026, 12,  1), D(2026, 12,  4), "通過",
          "2026-11-25 06:00"),
     ],
 
-    # Weekend cap=4 — four bookings all overlap on Sat 2026-12-12.
-    # Two come in via Wed-Sat (12/9-12/12), two via Sat-Tue (12/12-12/15), so
-    # weekday slots don't compete (Wed-Fri vs Mon-Tue). Saturday accumulates
-    # 1→2→3→4, all under 假日上限=4. Under the old single-quota=2 behaviour
-    # the 3rd and 4th (I3, I4) would have failed at Sat=3/2.
+    # Weekend cap=4 — four bookings all Sat-Tue 12/12-12/15 (the clean week
+    # between G1/G2's first-week takeover and G4/G5's Christmas week). Saturday
+    # 12/12 stacks 1→2→3→4, all under 假日上限=4; Sunday 12/13 the same. The 3rd
+    # and 4th nevertheless FAIL because Mon-Tue (12/14, 12/15) keep their
+    # weekday cap=2. The point is that the 已滿日 line on the rejected rows
+    # only lists Mon-Tue, NOT Sat-Sun — under the previous single-cap=2 rule
+    # the 3rd row would have failed at Sat 12/12 (3/2) first. So the verdicts
+    # are the same but the conflict-day listing changes.
     #
     # Manual override walkthrough (after this batch is processed):
-    #   1. Open 上限例外, add 2026-12-12 ~ 2026-12-12 with 上限人數=2.
+    #   1. Open 上限例外, add 2026-12-12 ~ 2026-12-12 with 上限人數=1 (tightening
+    #      this single Saturday).
     #   2. Clear the batch and re-upload this xlsx.
-    #   3. Expect I3 and I4 to flip from 通過 to 未通過 - 已超過上限人數
-    #      (Sat would be 3/2 then 4/2 with the override active).
+    #   3. Expect I1 to still 通過 (Sat 1/1), but I2/I3/I4 to all fail on
+    #      Sat 12/12 instead of Mon-Tue, demonstrating that the override
+    #      replaces the weekend default for that one date.
     (2026, 12): [
-        ("I1. 通過 — Wed-Sat 第 1 人 (Sat 1/4)",  "測試三", D(2026, 12,  9), D(2026, 12, 12), "通過"),
-        ("I2. 通過 — Wed-Sat 第 2 人 (Sat 2/4)",  "測試四", D(2026, 12,  9), D(2026, 12, 12), "通過"),
-        ("I3. 通過 — Sat-Tue 第 3 人 (Sat 3/4)",  "測試五", D(2026, 12, 12), D(2026, 12, 15), "通過"),
-        ("I4. 通過 — Sat-Tue 第 4 人 (Sat 4/4)",  "測試六", D(2026, 12, 12), D(2026, 12, 15), "通過"),
+        ("I1. 通過 — Sat-Tue 第 1 人",          "測試三", D(2026, 12, 12), D(2026, 12, 15), "通過"),
+        ("I2. 通過 — Sat-Tue 第 2 人 (Sat 2/4)", "測試四", D(2026, 12, 12), D(2026, 12, 15), "通過"),
+        ("I3. 未通過 — Sat 3/4 ✓ 但 Mon 3/2 ✗", "測試五", D(2026, 12, 12), D(2026, 12, 15), "未通過 - 已超過上限人數"),
+        ("I4. 未通過 — 同 I3 (週末未滿，平日已滿)", "測試六", D(2026, 12, 12), D(2026, 12, 15), "未通過 - 已超過上限人數"),
     ],
 }
 
