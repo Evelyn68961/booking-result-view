@@ -1446,12 +1446,18 @@ function renderSyncPanel() {
   if (!MANAGER_UNLOCKED) return;
   let panel = document.getElementById('syncPanel');
   if (!panel) {
-    panel = document.createElement('div');
+    panel = document.createElement('details');
     panel.className = 'panel';
     panel.id = 'syncPanel';
     panel.innerHTML = `
-      <h2>🔗 Google Sheet 同步</h2>
-      <div class="help">與管理員共用一份 Google Sheet。設定 Web App URL 後：每 2 分鐘自動上傳本機變更，切回此頁時自動下載最新資料。也可手動觸發。設定步驟見專案 <code>apps-script.gs</code>。</div>
+      <summary style="cursor:pointer; list-style:none;">
+        <span style="display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <span class="caret" aria-hidden="true">▸</span>
+          <h2 style="display:inline; margin:0;">🔗 Google Sheet 同步</h2>
+          <span class="help" id="syncStatus" style="margin-left:4px;"></span>
+        </span>
+      </summary>
+      <div class="help" style="margin-top:10px;">與管理員共用一份 Google Sheet。設定 Web App URL 後：每 2 分鐘自動上傳本機變更，切回此頁時自動下載最新資料。也可手動觸發。設定步驟見專案 <code>apps-script.gs</code>。</div>
       <label class="help" style="display:flex; flex-direction:column; gap:4px; margin-top:10px;">
         Web App URL（…/exec）
         <input id="syncUrl" type="text" placeholder="https://script.google.com/macros/s/.../exec" style="padding:8px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; font-family:inherit;" />
@@ -1459,11 +1465,13 @@ function renderSyncPanel() {
       <div class="actions-row">
         <button class="primary" id="syncPush">📤 上傳到 Sheet</button>
         <button class="ghost" id="syncPull">📥 從 Sheet 載入</button>
-        <div class="spacer"></div>
-        <span class="help" id="syncStatus"></span>
       </div>
     `;
     document.getElementById('managerContent').appendChild(panel);
+    panel.addEventListener('toggle', () => {
+      const c = panel.querySelector('.caret');
+      if (c) c.textContent = panel.open ? '▾' : '▸';
+    });
     $('syncUrl').onchange = () => setSheetUrl($('syncUrl').value.trim());
     $('syncPush').onclick = () => pushToSheet().catch(() => {});
     $('syncPull').onclick = () => pullFromSheet().catch(() => {});
