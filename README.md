@@ -6,15 +6,19 @@ A single-file HTML viewer + manager-approval helper for the existing 預假 Exce
 
 **檢視紀錄 tab** — search, filter, sort, and paginate every row in the baked xlsx (姓名 / 審核結果 / 起日 / 迄日 / 天數 / 送出時間 / 特休 / 時數). Manager-committed rows are marked `手動加入`.
 
-**預約日曆 tab** — month grid showing per-day occupancy of all 通過 entries (baked history + manager-committed rows). Cells are colour-coded — green = 空, yellow = 1 人, red = 2 人以上. Click a day to see who's booked (姓名 / 起日 / 迄日).
+**預約日曆 tab** — month grid showing per-day occupancy of all 通過 entries (baked history + manager-committed rows). Each cell shows `count / cap`, where the cap is the per-date daily limit (weekday/weekend defaults plus any range overrides — see 「上限例外」 below). Cells are colour-coded against that cap — green = 空, yellow = some bookings but room left, red = at the cap. Click a day to see who's booked (姓名 / 起日 / 迄日).
 
-**新申請審核 tab (password-protected)** — drop in a new申請 xlsx/csv (or add rows manually), and the page predicts 通過 / 未通過 for each entry by replaying the rules in [booking_rules.md](booking_rules.md) against the baked history + already-approved entries earlier in the batch. Manager can override (強制通過 / 強制未通過), commit decisions to localStorage, or export the batch as xlsx.
+**新申請審核 tab (password-protected)** — drop in a new申請 xlsx/csv (or add rows manually), and the page predicts 通過 / 未通過 for each entry by replaying the rules in [booking_rules.md](booking_rules.md) against the baked history + already-approved entries earlier in the batch. The batch is **evaluated in 送出時間 order** (earliest-submitted wins contention); the 送出時間 column is shown on every row so the manager can see the priority key. Manager can override (強制通過 / 強制未通過), commit decisions to localStorage, or export the batch as xlsx.
 
 Day-by-day occupancy for the touched dates is shown so it's obvious which days are full.
 
+**上限例外 panel (manager tab)** — set per-date or per-range exceptions to the daily 上限 (e.g. Christmas week = 3 人). The default 平日上限 (Mon–Fri) and 假日上限 (Sat–Sun) live next to the existing rule inputs; overrides are added in a small table below. When multiple overrides cover the same date, the **narrower** range wins (carve-outs beat baselines), with most-recently-edited as the tie-breaker.
+
 **Per-record edit / delete** — when the manager tab is unlocked, every row in the View tab gets 編輯 / 刪除 buttons. Edits to baked records become a localStorage "patches" overlay (the original xlsx is never mutated). Manager-added records are edited or removed in place. A separate panel in the manager tab lists the manual additions for inline tweaking, plus a bulk-wipe button.
 
-**Optional Google Sheet sync** — the manager tab has a 🔗 Google Sheet 同步 panel. Pasting an Apps Script Web App URL ([apps-script.gs](apps-script.gs) is the backend) gives you a shared sheet your managers can view/edit directly. The app auto-pushes local changes every 2 minutes and auto-pulls when the browser tab regains focus; manual 上傳 / 載入 buttons are also provided.
+**Optional Google Sheet sync** — the manager tab has a 🔗 Google Sheet 同步 panel (collapsed by default; click to expand). Pasting an Apps Script Web App URL ([apps-script.gs](apps-script.gs) is the backend) gives you a shared sheet your managers can view/edit directly. The app auto-pushes local changes every 2 minutes and auto-pulls when the browser tab regains focus; manual 上傳 / 載入 buttons are also provided. Quota config and the password-slot list (see below) sync via two extra tabs (`QuotaConfig`, `PasswordSlots`) that the script creates automatically.
+
+**Remember password on this device (up to 6 devices)** — the lock screen has a 「在此電腦記住密碼」 checkbox. Tick it and a successful unlock claims one of 6 globally-shared slots (tracked in the `PasswordSlots` sheet). Future visits auto-unlock without the manager retyping. The checkbox is disabled until the Google Sheet sync URL is configured, since the slot count needs the shared backend. A 「🔐 已記住密碼的裝置」 panel inside the manager tab lists every saved device and lets the manager revoke any of them; revoking a slot from another device causes that device to ask for the password again on its next visit.
 
 ## Files
 
@@ -46,7 +50,7 @@ This is obfuscation of the controls, not protection of the data — the baked re
 
 ## Storage
 
-Five localStorage keys (all per-browser, per-device):
+Eight localStorage keys (all per-browser, per-device):
 
 | Key | Holds |
 |---|---|
@@ -55,6 +59,9 @@ Five localStorage keys (all per-browser, per-device):
 | `booking-baked-patches-v1` | Edits / tombstones for the baked xlsx records. |
 | `booking-sheet-url-v1` | Apps Script Web App URL (if Sheet sync configured). |
 | `booking-sheet-last-sync-v1` | ISO timestamp of last successful sync. |
+| `booking-quota-config-v1` | Weekday / weekend daily caps + 上限例外 overrides. Synced via the `QuotaConfig` sheet. |
+| `booking-manager-password-v1` | Plaintext manager password — only present if the manager ticked 「在此電腦記住密碼」. |
+| `booking-device-id-v1` | Per-browser uuid used as the key into the `PasswordSlots` sheet. |
 
 The 「移除所有已儲存的新增紀錄」button clears `booking-extra-records-v1`; the original baked xlsx is never modified. To survive a browser-cache wipe or to share state across devices, configure the Google Sheet sync — see [spec.md](spec.md) and [apps-script.gs](apps-script.gs).
 
@@ -64,7 +71,7 @@ Run `python make_tests.py` to regenerate the monthly batch files
 (`batch-2026-04.xlsx` … `batch-2026-10.xlsx`). Recommended manager-tab settings:
 
 - Gate Day = `2026-05-02` → bookable window 2026-05-02 ~ 2027-01-03
-- 每日上限 = 2 / 單筆 4–10 天 / 年度 12 點
+- 平日上限 = 2 / 假日上限 = 4 / 單筆 4–10 天 / 年度 12 點 (上限例外 empty)
 
 Process the batches in filename order. After each batch, commit 通過 rows
 before uploading the next month — this lets historical state accumulate the
